@@ -1,0 +1,399 @@
+/* ================================================================
+ *  ENGINE OS — user/libc.h
+ *  Basic C library for user programs running on ENGINE OS.
+ *
+ *  Usage:
+ *    #include "libc.h"
+ *
+ *  Link with libc.o and crt0.o:
+ *    ld -m elf_x86_64 -static -nostdlib -Ttext=0x400000 \
+ *       -o MYPROG crt0.o libc.o myprog.o
+ * ================================================================ */
+
+#pragma once
+
+/* ── Basic types ─────────────────────────────────────────────── */
+typedef unsigned char       uint8_t;
+typedef unsigned short      uint16_t;
+typedef unsigned int        uint32_t;
+typedef unsigned long long  uint64_t;
+typedef signed char         int8_t;
+typedef signed short        int16_t;
+typedef signed int          int32_t;
+typedef signed long long    int64_t;
+typedef unsigned long long  size_t;
+typedef unsigned long long  uintptr_t;
+typedef signed long long    ssize_t;
+typedef signed long long    off_t;
+typedef int                 pid_t;
+typedef unsigned int        socklen_t;
+
+#define NULL    ((void*)0)
+#define EOF     (-1)
+#define true    1
+#define false   0
+
+/* ── Limits ──────────────────────────────────────────────────── */
+#define INT_MAX   0x7fffffff
+#define INT_MIN   (-INT_MAX - 1)
+#define UINT_MAX  0xffffffffU
+#define LONG_MAX  0x7fffffffffffffffLL
+#define SIZE_MAX  0xffffffffffffffffULL
+
+/* ── File descriptors ────────────────────────────────────────── */
+#define STDIN_FILENO    0
+#define STDOUT_FILENO   1
+#define STDERR_FILENO   2
+
+/* ── Error codes (errno-compatible subset) ───────────────────── */
+#define EPERM    1
+#define ENOENT   2
+#define EINTR    4
+#define EIO      5
+#define ENOMEM   12
+#define EACCES   13
+#define EBUSY    16
+#define EINVAL   22
+#define ENOSYS   38
+
+extern int errno;
+
+/* ── Syscall wrappers (low level) ────────────────────────────── */
+ssize_t read(int fd, void *buf, size_t count);
+ssize_t write(int fd, const void *buf, size_t count);
+int     open(const char *path, int flags);
+int     close(int fd);
+void    exit(int code) __attribute__((noreturn));
+void   *malloc(size_t n);
+void    free(void *ptr);
+void   *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off);
+int     munmap(void *addr, size_t len);
+void   *sbrk(ssize_t increment);
+pid_t   getpid(void);
+pid_t   fork(void);
+int     execve(const char *path, char **argv, char **envp);
+int     waitpid(pid_t pid, int *wstatus, int options);
+int     pipe(int pipefd[2]);
+int     dup(int oldfd);
+int     dup2(int oldfd, int newfd);
+int     kill(pid_t pid, int sig);
+void   *signal(int signum, void *handler);
+pid_t   wait(int *wstatus);
+pid_t   clone(int (*fn)(void*), void *stack, int flags, void *arg);
+int     socket(int domain, int type, int protocol);
+int     bind(int sockfd, const void *addr, socklen_t addrlen);
+int     connect(int sockfd, const void *addr, socklen_t addrlen);
+int     listen(int sockfd, int backlog);
+int     accept(int sockfd, void *addr, socklen_t *addrlen);
+ssize_t send(int sockfd, const void *buf, size_t len, int flags);
+ssize_t recv(int sockfd, void *buf, size_t len, int flags);
+int     shutdown(int sockfd, int how);
+
+/* ── String functions ────────────────────────────────────────── */
+size_t  strlen(const char *s);
+int     strcmp(const char *a, const char *b);
+int     strncmp(const char *a, const char *b, size_t n);
+char   *strcpy(char *dst, const char *src);
+char   *strncpy(char *dst, const char *src, size_t n);
+char   *strcat(char *dst, const char *src);
+char   *strncat(char *dst, const char *src, size_t n);
+char   *strchr(const char *s, int c);
+char   *strrchr(const char *s, int c);
+char   *strstr(const char *haystack, const char *needle);
+char   *strdup(const char *s);
+
+/* ── Memory functions ────────────────────────────────────────── */
+void   *memcpy(void *dst, const void *src, size_t n);
+void   *memmove(void *dst, const void *src, size_t n);
+void   *memset(void *dst, int c, size_t n);
+int     memcmp(const void *a, const void *b, size_t n);
+void   *memchr(const void *s, int c, size_t n);
+
+/* ── Character classification ────────────────────────────────── */
+int isdigit(int c);
+int isalpha(int c);
+int isalnum(int c);
+int isspace(int c);
+int isupper(int c);
+int islower(int c);
+int isprint(int c);
+int toupper(int c);
+int tolower(int c);
+
+/* ── Number conversion ───────────────────────────────────────── */
+int          atoi(const char *s);
+long         atol(const char *s);
+long long    atoll(const char *s);
+long         strtol(const char *s, char **endptr, int base);
+long long    strtoll(const char *s, char **endptr, int base);
+unsigned long strtoul(const char *s, char **endptr, int base);
+
+/* ── Formatted output ────────────────────────────────────────── */
+/*
+ * printf / fprintf / sprintf / snprintf
+ *
+ * Supported format specifiers:
+ *   %d  %i  — signed decimal int
+ *   %u      — unsigned decimal
+ *   %x  %X  — hex (lower / upper)
+ *   %o      — octal
+ *   %c      — character
+ *   %s      — string
+ *   %p      — pointer (hex with 0x prefix)
+ *   %ld %lu %lx %lld %llu %llx  — long / long long variants
+ *   %%      — literal %
+ *
+ * Width and precision (e.g. %5d, %-10s, %08x) are supported.
+ * %f / %e / %g are NOT supported (no FPU in kernel mode anyway).
+ */
+int printf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+int fprintf(int fd, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+int sprintf(char *buf, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+int snprintf(char *buf, size_t size, const char *fmt, ...) __attribute__((format(printf, 3, 4)));
+
+/* va_list support (compiler built-ins) */
+typedef __builtin_va_list va_list;
+#define va_start(v,l)  __builtin_va_start(v,l)
+#define va_end(v)      __builtin_va_end(v)
+#define va_arg(v,l)    __builtin_va_arg(v,l)
+
+int vprintf(const char *fmt, va_list ap);
+int vfprintf(int fd, const char *fmt, va_list ap);
+int vsprintf(char *buf, const char *fmt, va_list ap);
+int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap);
+
+/* ── Simple I/O helpers ──────────────────────────────────────── */
+int     putchar(int c);
+int     puts(const char *s);
+int     getchar(void);
+char   *gets_s(char *buf, size_t n);   /* safe line read, replaces gets() */
+
+/* ── Utility ─────────────────────────────────────────────────── */
+void   *calloc(size_t nmemb, size_t size);
+void   *realloc(void *ptr, size_t size);
+void    abort(void) __attribute__((noreturn));
+int     abs(int x);
+long    labs(long x);
+
+/* ── FILE* stdio layer ───────────────────────────────────────── */
+/*
+ * Thin wrapper over raw fd syscalls.  Each FILE holds an fd, a
+ * small r/w buffer, and flags.  Compatible with the subset of
+ * stdio that DOOM actually calls.
+ */
+#define FOPEN_MAX   16
+#define BUFSIZ      4096
+
+typedef struct _FILE {
+    int     fd;          /* underlying file descriptor, -1 = closed */
+    int     flags;       /* _FILE_READ | _FILE_WRITE | _FILE_ERR | _FILE_EOF */
+    /* write buffer */
+    unsigned char wbuf[BUFSIZ];
+    int     wpos;
+    /* read buffer */
+    unsigned char rbuf[BUFSIZ];
+    int     rpos;
+    int     rlen;
+} FILE;
+
+#define _FILE_READ   (1 << 0)
+#define _FILE_WRITE  (1 << 1)
+#define _FILE_ERR    (1 << 2)
+#define _FILE_EOF    (1 << 3)
+#define _FILE_STRM   (1 << 4)   /* stream (unbuffered stdout/stderr) */
+
+/* The three standard streams — defined in libc.c */
+extern FILE *stdin;
+extern FILE *stdout;
+extern FILE *stderr;
+
+/* Open/close */
+FILE   *fopen(const char *path, const char *mode);
+int     fclose(FILE *f);
+int     fflush(FILE *f);
+
+/* Read */
+size_t  fread(void *ptr, size_t size, size_t nmemb, FILE *f);
+int     fgetc(FILE *f);
+char   *fgets(char *buf, int n, FILE *f);
+#define getc(f)  fgetc(f)
+
+/* Write */
+size_t  fwrite(const void *ptr, size_t size, size_t nmemb, FILE *f);
+int     fputc(int c, FILE *f);
+int     fputs(const char *s, FILE *f);
+int     fprint(FILE *f, const char *fmt, ...) __attribute__((format(printf,2,3)));
+int     vfprint(FILE *f, const char *fmt, __builtin_va_list ap);
+#define putc(c,f) fputc(c,f)
+
+/* Seek / tell */
+int     fseek(FILE *f, long offset, int whence);
+long    ftell(FILE *f);
+void    rewind(FILE *f);
+
+/* State */
+int     feof(FILE *f);
+int     ferror(FILE *f);
+void    clearerr(FILE *f);
+
+/* Rename / remove (thin wrappers over syscalls) */
+int     remove(const char *path);
+int     rename_file(const char *old, const char *nw);  /* rename() clashes with syscall name */
+
+/* Seek constants */
+#define SEEK_SET  0
+#define SEEK_CUR  1
+#define SEEK_END  2
+
+/* ── Timer — millisecond precision ──────────────────────────── */
+/*
+ * gettime_ms() — milliseconds since kernel boot.
+ * PIT is programmed at 1000 Hz so pit_ticks == milliseconds.
+ * Suitable for frame timing, timeouts, DOOM's ticcount.
+ */
+static inline long long gettime_ms(void) {
+    long long r;
+    __asm__ volatile("syscall"
+        : "=a"(r) : "0"(327LL) : "rcx","r11","memory");
+    return r;
+}
+
+/* ── Mouse relative / grabbed mode ──────────────────────────── */
+/*
+ * mouse_setrelative(1) — grab mouse for FPS mouse-look.
+ *   Hides the GUI cursor; poll_mouse() returns raw deltas with no
+ *   cursor clamping.  The cursor won't drift to a screen edge.
+ * mouse_setrelative(0) — release; restore GUI cursor mode.
+ */
+static inline void mouse_setrelative(int on) {
+    __asm__ volatile("syscall"
+        : : "a"(328LL), "D"((long long)on) : "rcx","r11","memory");
+}
+
+/* ── setjmp / longjmp ────────────────────────────────────────── */
+/*
+ * jmp_buf saves the 6 callee-saved registers + rsp + rip (return
+ * address) needed to restore execution context.
+ * Layout (8 bytes each, 8 slots = 64 bytes):
+ *   [0] rbx  [1] rbp  [2] r12  [3] r13  [4] r14  [5] r15
+ *   [6] rsp  [7] rip  (rip = return address from setjmp call site)
+ */
+typedef unsigned long long jmp_buf[8];
+
+/*
+ * setjmp(env) — save CPU state into env.
+ * Returns 0 when called directly.
+ * Returns the nonzero val passed to longjmp() when jumped back to.
+ */
+static inline int setjmp(jmp_buf env) {
+    int r;
+    __asm__ volatile(
+        "mov  %%rbx,    (%1)\n\t"
+        "mov  %%rbp,   8(%1)\n\t"
+        "mov  %%r12,  16(%1)\n\t"
+        "mov  %%r13,  24(%1)\n\t"
+        "mov  %%r14,  32(%1)\n\t"
+        "mov  %%r15,  40(%1)\n\t"
+        "lea  8(%%rsp), %%rax\n\t"   /* rsp at call site (before ret addr) */
+        "mov  %%rax,  48(%1)\n\t"
+        "mov  (%%rsp), %%rax\n\t"    /* return address = rip at call site  */
+        "mov  %%rax,  56(%1)\n\t"
+        "xor  %0, %0\n\t"            /* return 0 */
+        : "=r"(r)
+        : "r"(env)
+        : "rax", "memory"
+    );
+    return r;
+}
+
+/*
+ * longjmp(env, val) — restore CPU state from env and jump back.
+ * val is returned by the corresponding setjmp(); val=0 becomes 1.
+ * Does not return.
+ */
+static inline void longjmp(jmp_buf env, int val) __attribute__((noreturn));
+static inline void longjmp(jmp_buf env, int val) {
+    if (val == 0) val = 1;
+    __asm__ volatile(
+        "mov    (%0), %%rbx\n\t"
+        "mov   8(%0), %%rbp\n\t"
+        "mov  16(%0), %%r12\n\t"
+        "mov  24(%0), %%r13\n\t"
+        "mov  32(%0), %%r14\n\t"
+        "mov  40(%0), %%r15\n\t"
+        "mov  48(%0), %%rsp\n\t"
+        "mov  56(%0), %%rax\n\t"   /* saved rip (return address) */
+        "mov  %1,     %%edi\n\t"   /* val → first return register */
+        "jmp  *%%rax\n\t"
+        :
+        : "r"(env), "r"(val)
+        : /* everything is clobbered — doesn't matter, noreturn */
+    );
+    __builtin_unreachable();
+}
+
+/* ── Phase 1: Input & Controls ───────────────────────────────── */
+
+/* KeyEvent — returned by poll_keys() */
+typedef struct {
+    unsigned char  scancode;  /* raw PS/2 make-code                  */
+    unsigned char  ascii;     /* translated ASCII, 0 if non-printable */
+    unsigned char  mods;      /* INPUT_MOD_* bitmask                 */
+    unsigned char  _pad;
+} KeyEvent;
+
+#define INPUT_MOD_SHIFT  (1 << 0)
+#define INPUT_MOD_CTRL   (1 << 1)
+#define INPUT_MOD_ALT    (1 << 2)
+#define INPUT_MOD_CAPS   (1 << 3)
+
+/* MouseEvent — returned by poll_mouse() */
+typedef struct {
+    long long dx;         /* relative X (positive = right)  */
+    long long dy;         /* relative Y (positive = up)     */
+    unsigned char buttons; /* INPUT_BTN_* bitmask            */
+    unsigned char _pad[7];
+} MouseEvent;
+
+#define INPUT_BTN_LEFT   (1 << 0)
+#define INPUT_BTN_RIGHT  (1 << 1)
+#define INPUT_BTN_MIDDLE (1 << 2)
+
+/* PadState — returned by poll_pad() */
+typedef struct {
+    long long axis_x;      /* -128 .. 127                    */
+    long long axis_y;
+    unsigned short buttons; /* bitmask of up to 16 buttons   */
+    unsigned char  connected;
+    unsigned char  _pad[5];
+} PadState;
+
+/* poll_keys(buf, max) — drain up to max KeyEvents; returns count */
+static inline long poll_keys(KeyEvent *buf, unsigned long max) {
+    long r;
+    __asm__ volatile("syscall"
+        : "=a"(r)
+        : "0"(300UL), "D"((unsigned long)buf), "S"(max)
+        : "rcx","r11","memory");
+    return r;
+}
+
+/* poll_mouse(buf, max) — drain up to max MouseEvents; returns count */
+static inline long poll_mouse(MouseEvent *buf, unsigned long max) {
+    long r;
+    __asm__ volatile("syscall"
+        : "=a"(r)
+        : "0"(301UL), "D"((unsigned long)buf), "S"(max)
+        : "rcx","r11","memory");
+    return r;
+}
+
+/* poll_pad(buf) — snapshot current pad state; returns 1 if connected */
+static inline long poll_pad(PadState *buf) {
+    long r;
+    __asm__ volatile("syscall"
+        : "=a"(r)
+        : "0"(302UL), "D"((unsigned long)buf)
+        : "rcx","r11","memory");
+    return r;
+}

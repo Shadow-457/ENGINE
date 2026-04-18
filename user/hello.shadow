@@ -1,0 +1,23 @@
+# hello.shadow — basic Shadow demo
+
+set x to 10
+set y to 20
+set sum to x + y
+
+print sum
+
+# countdown from 5
+set n to 5
+repeat while n greater 0
+    print n
+    set n to n - 1
+end
+
+# check which is bigger
+if x less y then
+    print 1
+else
+    print 0
+end
+
+return 0

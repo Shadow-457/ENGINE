@@ -1,0 +1,15 @@
+# fib.shadow — first 10 Fibonacci numbers
+
+set a to 0
+set b to 1
+set i to 0
+
+repeat while i less 10
+    print a
+    set tmp to a + b
+    set a to b
+    set b to tmp
+    set i to i + 1
+end
+
+return 0
