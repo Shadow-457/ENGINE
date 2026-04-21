@@ -1,5 +1,5 @@
 /* ================================================================
- *  ENGINE OS — kernel/gfx.c
+ *  SoftTail OS — kernel/gfx.c
  *  Phase 2: Graphics & Rendering
  *
  *  Three subsystems:

@@ -1,5 +1,5 @@
 /* ================================================================
- *  ENGINE OS Browser — browser/browser.c
+ *  SoftTail OS Browser — browser/browser.c
  *  Main entry point — event loop, input, navigation
  *
  *  Compile:
@@ -19,7 +19,7 @@
 #include "render.h"
 
 /* ── Input syscalls ──────────────────────────────────────────── */
-/* ENGINE OS syscall table (kernel/isr.S):
+/* SoftTail OS syscall table (kernel/isr.S):
  *   300 = sys_poll_keys  (used via libc.h poll_keys())
  *   301 = sys_poll_mouse (used via libc.h poll_mouse())
  *   303 = sys_yield
@@ -45,7 +45,7 @@ static inline void sys_yield(void) {
 /* libc.h already defines KeyEvent, MouseEvent, poll_keys(),
  * poll_mouse() with the correct syscall numbers (300, 301).      */
 
-/* Absolute mouse state (accumulate relative deltas from ENGINE)  */
+/* Absolute mouse state (accumulate relative deltas from SoftTail)  */
 typedef struct { int x; int y; int buttons; } MouseState;
 static MouseState g_mouse = {512, 384, 0};  /* start centre screen */
 
@@ -70,7 +70,7 @@ static inline void input_get_mouse(MouseState *out) {
     long n = poll_mouse(_mou_buf, 8);
     for (long i = 0; i < n; i++) {
         g_mouse.x += (int)_mou_buf[i].dx;
-        g_mouse.y -= (int)_mou_buf[i].dy;  /* ENGINE dy: up=positive */
+        g_mouse.y -= (int)_mou_buf[i].dy;  /* SoftTail dy: up=positive */
         g_mouse.buttons = (int)_mou_buf[i].buttons;
         if (g_mouse.x < 0)     g_mouse.x = 0;
         if (g_mouse.x >= FB_W) g_mouse.x = FB_W - 1;
@@ -142,7 +142,7 @@ static void navigate(const char *url) {
             "<html><body style='background:#fff;color:#c00;font-size:18;'>"
             "<h1>Cannot load page</h1>"
             "<p>Could not connect to server.</p>"
-            "<p>Check that ENGINE OS networking is running.</p>"
+            "<p>Check that SoftTail OS networking is running.</p>"
             "</body></html>";
         for (int j=0; err_html[j]; j++) html_buf[j]=err_html[j];
         html_buf[sizeof(err_html)-1]=0;
@@ -262,10 +262,10 @@ static inline char sc_to_ascii(int sc) {
 
 /* ── Home page HTML ──────────────────────────────────────────── */
 static const char home_html[] =
-"<html><head><title>ENGINE Browser</title></head>"
+"<html><head><title>SoftTail Browser</title></head>"
 "<body style='background:#f0f4ff;color:#222;'>"
-"<h1 style='color:#1a6cc4;'>ENGINE Browser</h1>"
-"<p>Welcome to ENGINE OS Browser — running directly on the metal!</p>"
+"<h1 style='color:#1a6cc4;'>SoftTail Browser</h1>"
+"<p>Welcome to SoftTail OS Browser — running directly on the metal!</p>"
 "<hr>"
 "<h2>Quick links</h2>"
 "<ul>"
@@ -293,10 +293,10 @@ int main(void) {
     html_buf[sizeof(home_html)-1]=0;
 
     for (int i=0;i<URL_MAX;i++) current_url[i]=0;
-    const char *home = "engine://home";
+    const char *home = "softtail://home";
     for (int i=0;home[i];i++) current_url[i]=home[i];
     for (int i=0;i<URL_MAX;i++) url_bar[i]=current_url[i];
-    url_bar_len=13; /* strlen("engine://home") */
+    url_bar_len=13; /* strlen("softtail://home") */
 
     dom_root    = html_parse(html_buf);
     css_resolve(dom_root);

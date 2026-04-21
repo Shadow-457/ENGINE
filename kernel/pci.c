@@ -1,5 +1,5 @@
 /* ================================================================
- *  ENGINE OS — kernel/pci.c
+ *  SoftTail OS — kernel/pci.c
  *  PCI/PCIe enumeration, BAR sizing, capability walk, ECAM support
  * ================================================================ */
 #include "../include/kernel.h"

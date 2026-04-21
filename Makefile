@@ -1,9 +1,9 @@
 export PATH := $(PATH):/usr/sbin
 # ================================================================
-#  ENGINE OS v3.0 -- Makefile  (C kernel edition)
+#  SoftTail OS v3.0 -- Makefile  (C kernel edition)
 #
 #  Targets:
-#    make            -> build engine.img (bootable disk image)
+#    make            -> build softtail.img (bootable disk image)
 #    make run        -> launch in QEMU with debug log
 #    make run-quiet  -> launch in QEMU silently
 #    make hello      -> build user/HELLO_C example program
@@ -111,18 +111,18 @@ kernel.bin: $(KERNEL_OBJS) linker.ld
 # -- FAT32 partition image -----------------------------------------
 fat32.img:
 	dd if=/dev/zero of=$@ bs=1M count=64 status=none
-	mkfs.fat -F 32 -n ENGINEOS $@
+	mkfs.fat -F 32 -n SOFTTAILOS $@
 	echo "Engine OS v3.0 (C kernel)" > /tmp/README.TXT
 	MTOOLS_SKIP_CHECK=1 mcopy -i $@ /tmp/README.TXT ::/README.TXT
 
 # -- Combined bootable disk image ----------------------------------
-engine.img: boot.bin kernel.bin fat32.img
+softtail.img: boot.bin kernel.bin fat32.img
 	dd if=/dev/zero  of=$@ bs=512 count=131072 status=none
 	dd if=boot.bin   of=$@ bs=512 conv=notrunc status=none
 	dd if=kernel.bin of=$@ bs=512 seek=1  conv=notrunc status=none
 	dd if=fat32.img  of=$@ bs=512 seek=512 conv=notrunc status=none
 
-all: engine.img
+all: softtail.img
 
 # -- QEMU ----------------------------------------------------------
 # Fixed MAC ensures net_init can read it from RAL0/RAH0 before reset.
@@ -134,16 +134,16 @@ DISP = -device bochs-display,xres=1024,yres=768
 USBHID = # PS/2 keyboard+mouse used — GUI polls port 0x60/0x64 directly
 AUDIO = -device sb16,audiodev=snd0 -audiodev sdl,id=snd0
 
-run: engine.img
-	$(QEMU) -drive format=raw,file=engine.img,if=ide \
+run: softtail.img
+	$(QEMU) -drive format=raw,file=softtail.img,if=ide \
 	        -m 128M -no-reboot \
 	        -machine pc,accel=tcg \
 	        $(DISP) $(USBHID) \
 	        $(NIC) \
 	        $(AUDIO)
 
-run-quiet: engine.img
-	$(QEMU) -drive format=raw,file=engine.img,if=ide \
+run-quiet: softtail.img
+	$(QEMU) -drive format=raw,file=softtail.img,if=ide \
 	        -m 128M -no-reboot \
 	        -machine pc,accel=tcg \
 	        $(DISP) $(USBHID) \
@@ -151,8 +151,8 @@ run-quiet: engine.img
 	        $(AUDIO) \
 	        -display gtk
 
-run-sdl: engine.img
-	$(QEMU) -drive format=raw,file=engine.img,if=ide \
+run-sdl: softtail.img
+	$(QEMU) -drive format=raw,file=softtail.img,if=ide \
 	        -m 128M -no-reboot \
 	        -machine pc,accel=tcg \
 	        $(DISP) $(USBHID) \
@@ -160,8 +160,8 @@ run-sdl: engine.img
 	        $(AUDIO) \
 	        -display sdl
 
-run-nographic: engine.img
-	$(QEMU) -drive format=raw,file=engine.img,if=ide \
+run-nographic: softtail.img
+	$(QEMU) -drive format=raw,file=softtail.img,if=ide \
 	        -m 128M -no-reboot \
 	        -machine pc,accel=tcg \
 	        $(DISP) $(USBHID) \
@@ -184,7 +184,7 @@ shc: SHC
 
 addshc: SHC fat32.img
 	MTOOLS_SKIP_CHECK=1 mcopy -i fat32.img SHC ::/SHC
-	dd if=fat32.img of=engine.img bs=512 seek=512 conv=notrunc status=none
+	dd if=fat32.img of=softtail.img bs=512 seek=512 conv=notrunc status=none
 	@echo "SHC added to disk. Boot EngineOS and run: elf SHC"
 
 # -- libc (basic C library for user programs) ----------------------
@@ -234,20 +234,20 @@ POSIX_TEST: user/crt0.o user/libc.o user/posix_test.o
 posix_test: POSIX_TEST
 	@echo "Built POSIX_TEST -- add to disk with: make addprog PROG=POSIX_TEST"
 
-programs: engine.img HELLO_C MYPROGRAM POSIX_TEST
+programs: softtail.img HELLO_C MYPROGRAM POSIX_TEST
 	MTOOLS_SKIP_CHECK=1 mcopy -i fat32.img HELLO_C   ::/HELLO_C
 	MTOOLS_SKIP_CHECK=1 mcopy -i fat32.img MYPROGRAM ::/MYPROGRAM
 	MTOOLS_SKIP_CHECK=1 mcopy -i fat32.img POSIX_TEST ::/POSIX_TEST
-	dd if=fat32.img of=engine.img bs=512 seek=512 conv=notrunc status=none
-	@echo "Added HELLO_C, MYPROGRAM and POSIX_TEST to engine.img"
+	dd if=fat32.img of=softtail.img bs=512 seek=512 conv=notrunc status=none
+	@echo "Added HELLO_C, MYPROGRAM and POSIX_TEST to softtail.img"
 	@echo "  Boot QEMU then run:  elf POSIX_TEST"
 
 # -- Add a program to the FAT32 partition --------------------------
 # Usage: make addprog PROG=./myapp
 addprog: fat32.img
 	MTOOLS_SKIP_CHECK=1 mcopy -i fat32.img $(PROG) ::/$(notdir $(PROG))
-	dd if=fat32.img of=engine.img bs=512 seek=512 conv=notrunc status=none
-	@echo "Added $(notdir $(PROG)) to engine.img -- run with: elf $(notdir $(PROG))"
+	dd if=fat32.img of=softtail.img bs=512 seek=512 conv=notrunc status=none
+	@echo "Added $(notdir $(PROG)) to softtail.img -- run with: elf $(notdir $(PROG))"
 
 # -- Add sample .shadow source files to disk -----------------------
 addshadow: fat32.img
@@ -258,11 +258,11 @@ addshadow: fat32.img
 
 # -- Build compiler + add everything to disk in one shot -----------
 # This is the main workflow: build SHC, add it + sample files to disk
-compiler: engine.img SHC
+compiler: softtail.img SHC
 	MTOOLS_SKIP_CHECK=1 mcopy -i fat32.img SHC ::/SHC
 	MTOOLS_SKIP_CHECK=1 mcopy -i fat32.img user/fib.shadow ::/FIB.SHA
 	MTOOLS_SKIP_CHECK=1 mcopy -i fat32.img user/hello.shadow ::/HELLO.SHA
-	dd if=fat32.img of=engine.img bs=512 seek=512 conv=notrunc status=none
+	dd if=fat32.img of=softtail.img bs=512 seek=512 conv=notrunc status=none
 	@echo ""
 	@echo "  SHC compiler + sample .shadow files added to disk."
 	@echo "  Boot EngineOS, then:"
@@ -274,7 +274,7 @@ compiler: engine.img SHC
 # -- Clean ---------------------------------------------------------
 clean:
 	rm -f boot/boot.o kernel/*.o kernel/entry.o kernel/isr.o boot_elf.tmp
-	rm -f boot.bin kernel.bin fat32.img engine.img
+	rm -f boot.bin kernel.bin fat32.img softtail.img
 	rm -f user/crt0.o user/hello.o user/myprogram.o user/shc.o user/libc.o user/echo_server.o user/echo_client.o browser/browser.o
 	rm -f HELLO_C MYPROGRAM SHC ECHO_SRV ECHO_CLI BROWSER
 	rm -f qemu.log /tmp/README.TXT
@@ -297,12 +297,12 @@ ECHO_CLI: user/crt0.o user/libc.o user/echo_client.o
 	$(LD) -m elf_x86_64 -static -nostdlib \
 	      -Ttext=0x400000 -o $@ $^
 
-ipc_demo: engine.img ECHO_SRV ECHO_CLI
+ipc_demo: softtail.img ECHO_SRV ECHO_CLI
 	MTOOLS_SKIP_CHECK=1 mcopy -i fat32.img ECHO_SRV ::/ECHO_SRV
 	MTOOLS_SKIP_CHECK=1 mcopy -i fat32.img ECHO_CLI ::/ECHO_CLI
-	dd if=fat32.img of=engine.img bs=512 seek=512 conv=notrunc status=none
+	dd if=fat32.img of=softtail.img bs=512 seek=512 conv=notrunc status=none
 	@echo "Added ECHO_SRV and ECHO_CLI to disk"
-	@echo "  In ENGINE shell:"
+	@echo "  In SoftTail shell:"
 	@echo "    elf ECHO_SRV   <- start server in background"
 	@echo "    elf ECHO_CLI   <- run client, should print: IPC round-trip OK!"
 	@echo "    ipc            <- list registered servers"
@@ -332,17 +332,17 @@ browser: BROWSER
 
 addbrowser: BROWSER fat32.img
 	MTOOLS_SKIP_CHECK=1 mcopy -i fat32.img BROWSER ::/BROWSER
-	dd if=fat32.img of=engine.img bs=512 seek=512 conv=notrunc status=none
+	dd if=fat32.img of=softtail.img bs=512 seek=512 conv=notrunc status=none
 	@echo ""
-	@echo "  BROWSER added to engine.img"
-	@echo "  Boot ENGINE OS, then at the shell:"
+	@echo "  BROWSER added to softtail.img"
+	@echo "  Boot SoftTail OS, then at the shell:"
 	@echo "    elf BROWSER"
 	@echo ""
 
 # One-shot: build kernel + browser + write to disk
-browser-all: engine.img BROWSER
+browser-all: softtail.img BROWSER
 	MTOOLS_SKIP_CHECK=1 mcopy -i fat32.img BROWSER ::/BROWSER
-	dd if=fat32.img of=engine.img bs=512 seek=512 conv=notrunc status=none
-	@echo "engine.img ready with BROWSER. Run: make run"
+	dd if=fat32.img of=softtail.img bs=512 seek=512 conv=notrunc status=none
+	@echo "softtail.img ready with BROWSER. Run: make run"
 
 .PHONY: browser addbrowser browser-all

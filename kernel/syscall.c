@@ -353,7 +353,7 @@ i64 sys_stub_enosys(void) { return (i64)ENOSYS; }
 typedef struct { char f[65]; } UTS;
 i64 sys_uname(void *buf) {
     UTS *u = (UTS*)buf;
-    const char *fields[] = {"ENGINE","engine","0.1.0","#1 SMP","x86_64",""};
+    const char *fields[] = {"SoftTail","softtail","0.1.0","#1 SMP","x86_64",""};
     for (int i = 0; i < 6; i++) {
         memset(u[i].f, 0, 65);
         const char *s = fields[i];

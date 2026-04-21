@@ -1,5 +1,5 @@
 /* ================================================================
- *  ENGINE OS — kernel/net.c
+ *  SoftTail OS — kernel/net.c
  *
  *  Full network stack:
  *    Layer 1: e1000 (Intel 8254x) driver — PCI, MMIO, TX/RX rings
@@ -1106,7 +1106,7 @@ static void http_handle_one(TcpConn *c) {
     if (pi == 0) {
         /* Root request — list files */
         static const char index_page[] =
-            "<html><body><h2>ENGINE HTTP Server</h2>"
+            "<html><body><h2>SoftTail HTTP Server</h2>"
             "<p>Specify a filename in the URL, e.g. /HELLO.TXT</p>"
             "</body></html>";
         http_send_response(c, 200, index_page,

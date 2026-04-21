@@ -1,7 +1,7 @@
 /* ================================================================
- *  ENGINE OS Browser — browser/net.h
+ *  SoftTail OS Browser — browser/net.h
  *  HTTP/HTTPS fetch layer (Phase 1 - already exists in kernel,
- *  this is the user-space wrapper that calls ENGINE OS syscalls)
+ *  this is the user-space wrapper that calls SoftTail OS syscalls)
  * ================================================================ */
 #pragma once
 #include "../user/libc.h"
@@ -59,7 +59,7 @@ static inline int url_parse(const char *url, ParsedUrl *out) {
     return 0;
 }
 
-/* ── DNS resolve via ENGINE OS syscall 333 (sys_net_dns) ─────── */
+/* ── DNS resolve via SoftTail OS syscall 333 (sys_net_dns) ─────── */
 #define SYS_NET_DNS   333
 
 static inline unsigned int browser_dns_resolve(const char *host) {
@@ -71,7 +71,7 @@ static inline unsigned int browser_dns_resolve(const char *host) {
     return (unsigned int)r;
 }
 
-/* ── TCP connect via ENGINE OS syscall ───────────────────────── */
+/* ── TCP connect via SoftTail OS syscall ───────────────────────── */
 #define SYS_SOCKET   41
 #define SYS_CONNECT  42
 #define AF_INET      2
@@ -136,7 +136,7 @@ static inline int http_fetch(const char *host, int port, const char *path,
     const char *ver = " HTTP/1.0\r\nHost: ";
     for (int i=0;ver[i];i++) req[ri++]=ver[i];
     for (int i=0;host[i]&&ri<980;i++) req[ri++]=host[i];
-    const char *end = "\r\nUser-Agent: ENGINE-Browser/1.0\r\nAccept: text/html\r\nConnection: close\r\n\r\n";
+    const char *end = "\r\nUser-Agent: SoftTail-Browser/1.0\r\nAccept: text/html\r\nConnection: close\r\n\r\n";
     for (int i=0;end[i]&&ri<1023;i++) req[ri++]=end[i];
     req[ri]=0;
 
@@ -208,7 +208,7 @@ static inline int https_fetch(const char *host, int port, const char *path,
     const char *ver = " HTTP/1.0\r\nHost: ";
     for (int i=0;ver[i];i++) req[ri++]=ver[i];
     for (int i=0;host[i]&&ri<980;i++) req[ri++]=host[i];
-    const char *end = "\r\nUser-Agent: ENGINE-Browser/1.0\r\nAccept: text/html\r\nConnection: close\r\n\r\n";
+    const char *end = "\r\nUser-Agent: SoftTail-Browser/1.0\r\nAccept: text/html\r\nConnection: close\r\n\r\n";
     for (int i=0;end[i]&&ri<1023;i++) req[ri++]=end[i];
 
     tls_write(&tls, (unsigned char*)req, (unsigned int)ri);

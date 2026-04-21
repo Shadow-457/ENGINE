@@ -39,7 +39,7 @@ static char shell_cwd[MAX_PATH] = "/";
 static char shell_line[SHELL_MAX_LINE];
 static char shell_args_buf[SHELL_MAX_LINE];
 
-static const char *shell_prompt = "engine$ ";
+static const char *shell_prompt = "softtail$ ";
 
 void shell_init(void) {
     memset(shell_vars, 0, sizeof(shell_vars));
@@ -343,10 +343,10 @@ static i64 shell_exec_pipeline(shell_pipeline_t *pipeline) {
 
 void shell_run(void) {
     shell_init();
-    print_str("\r\nENGINE OS Shell v1.0\r\n");
+    print_str("\r\nSoftTail OS Shell v1.0\r\n");
     print_str("Type 'help' for commands\r\n\r\n");
     while (1) {
-        print_str("engine:");
+        print_str("softtail:");
         print_str(shell_cwd);
         print_str("$ ");
         int pos = 0;

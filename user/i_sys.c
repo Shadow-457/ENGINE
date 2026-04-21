@@ -1,9 +1,9 @@
 /* ================================================================
- *  ENGINE OS — user/i_sys.c
+ *  SoftTail OS — user/i_sys.c
  *  DOOM platform layer: system
  *
  *  Covers timing, keyboard input, error handling, and the main
- *  loop glue.  All ENGINE-specific calls go through libc.h and
+ *  loop glue.  All SoftTail-specific calls go through libc.h and
  *  gfx.h / sound.h wrappers.
  *
  *  DOOM calls (all must be defined):
@@ -82,7 +82,7 @@ void I_Error(const char *error, ...) {
  * DOOM event types (from doomdef.h):
  *   ev_keydown=0, ev_keyup=1, ev_mouse=2, ev_joystick=3
  *
- * DOOM key codes relevant to ENGINE:
+ * DOOM key codes relevant to SoftTail:
  *   KEY_RIGHTARROW=0xae, KEY_LEFTARROW=0xac, KEY_UPARROW=0xad,
  *   KEY_DOWNARROW=0xaf, KEY_ESCAPE=27, KEY_ENTER=13, KEY_SPACE=32,
  *   KEY_CTRL=0x80|0x1d, KEY_SHIFT=0x80|0x36, KEY_ALT=0x80|0x38
@@ -100,7 +100,7 @@ typedef struct {
 /* Forward declaration — defined in DOOM's d_main.c */
 extern void D_PostEvent(event_t *ev);
 
-/* ENGINE scancode → DOOM key code translation */
+/* SoftTail scancode → DOOM key code translation */
 static int sc_to_doom(unsigned char sc, unsigned char ascii) {
     /* Arrow keys (E0-prefixed stored as 0x80|sc) */
     if (sc == (0x80|0x48)) return 0xad;   /* up    */
@@ -126,7 +126,7 @@ static int sc_to_doom(unsigned char sc, unsigned char ascii) {
 
 /*
  * I_StartTic — called by DOOM once per tic to collect pending input.
- * We drain the ENGINE key and mouse ring buffers and post events.
+ * We drain the SoftTail key and mouse ring buffers and post events.
  */
 void I_StartTic(void) {
     /* ── Keyboard ── */

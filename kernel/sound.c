@@ -1,5 +1,5 @@
 /* ================================================================
- *  ENGINE OS — kernel/sound.c
+ *  SoftTail OS — kernel/sound.c
  *  Phase 3: Audio
  *
  *  Two independent audio subsystems:

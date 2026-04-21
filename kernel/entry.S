@@ -1,5 +1,5 @@
 # ================================================================
-#  ENGINE OS — kernel/entry.S
+#  SoftTail OS — kernel/entry.S
 #  Kernel entry: real mode → protected mode → long mode → kernel_main()
 # ================================================================
 

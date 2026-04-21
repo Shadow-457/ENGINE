@@ -1,7 +1,7 @@
 #include "libc.h"
 
 int main(void) {
-    printf("=== ENGINE OS POSIX Feature Demo ===\r\n\r\n");
+    printf("=== SoftTail OS POSIX Feature Demo ===\r\n\r\n");
 
     printf("[1] Testing fork() + execve()...\r\n");
     pid_t pid = fork();

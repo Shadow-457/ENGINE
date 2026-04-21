@@ -1,5 +1,5 @@
 /* ================================================================
- *  ENGINE OS Browser — browser/css.h
+ *  SoftTail OS Browser — browser/css.h
  *  CSS tokeniser + style resolver (Phase 3)
  *
  *  Parses inline <style> blocks and inline style="" attrs.

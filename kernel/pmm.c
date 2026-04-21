@@ -1,5 +1,5 @@
 /* ================================================================
- *  ENGINE OS — kernel/pmm.c  (v4: 64-bit physical memory, no 4 GB cap)
+ *  SoftTail OS — kernel/pmm.c  (v4: 64-bit physical memory, no 4 GB cap)
  *
  *  Changes from v3:
  *    - RAM_END_MAX raised to 64 GB in kernel.h

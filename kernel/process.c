@@ -1,5 +1,5 @@
 /* ================================================================
- *  ENGINE OS — kernel/process.c  (PATCHED)
+ *  SoftTail OS — kernel/process.c  (PATCHED)
  *  Fix Bug 2: CR3 must be switched INSIDE the iretq asm sequence,
  *  not before it.  If vmm_switch() runs while we are still using
  *  the kernel stack, and the new CR3 does not map that stack page,

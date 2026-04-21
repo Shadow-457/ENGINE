@@ -638,7 +638,7 @@ void gui_open_shell_window(void){
     if(id<0)return;
     int sw=gui_window_create(100,80,560,440,"Terminal");
     if(sw<0)return;g_shell_win_id=sw;g_shell_pos=0;g_shell_buf[0]='\0';g_shell_out_pos=0;g_shell_output[0]='\0';
-    int cy=8;gui_widget_add_label(sw,8,cy,"ENGINE Shell v0.2",500);cy+=GLYPH_H+8;gui_widget_add_separator(sw,cy,501);cy+=8;gui_widget_add_label(sw,8,cy,"$ _",502);
+    int cy=8;gui_widget_add_label(sw,8,cy,"SoftTail Shell v0.2",500);cy+=GLYPH_H+8;gui_widget_add_separator(sw,cy,501);cy+=8;gui_widget_add_label(sw,8,cy,"$ _",502);
 }
 
 void gui_shell_append(const char*text){
@@ -657,13 +657,13 @@ static void gui_process_command(void){
     else if(strcmp(s,"clear")==0){g_shell_out_pos=0;g_shell_output[0]='\0';}
     else if(strcmp(s,"ls")==0)gui_shell_append("README.TXT  HELLO.C  MYPROGRAM  SHC  FIB.SHA  HELLO.SHA  POSIX_TEST  DOCS/\n");
     else if(strcmp(s,"meminfo")==0)gui_shell_append("Total: 128 MB  Used: 16 MB  Free: 112 MB\n");
-    else if(strcmp(s,"uname")==0||strcmp(s,"uname -a")==0)gui_shell_append("ENGINE 0.2 x86_64\n");
-    else if(strcmp(s,"ver")==0)gui_shell_append("ENGINE v0.2 Desktop Environment (x86-64)\n");
+    else if(strcmp(s,"uname")==0||strcmp(s,"uname -a")==0)gui_shell_append("SoftTail 0.2 x86_64\n");
+    else if(strcmp(s,"ver")==0)gui_shell_append("SoftTail v0.2 Desktop Environment (x86-64)\n");
     else if(strcmp(s,"whoami")==0)gui_shell_append("root\n");
     else if(strcmp(s,"ps")==0)gui_shell_append("PID  STATE    NAME\n 01  RUNNING  shell\n 02  READY    file_manager\n 03  READY    terminal\n");
     else if(strcmp(s,"net")==0)gui_shell_append("e1000: DOWN  IP: 0.0.0.0  GW: 0.0.0.0\n");
     else if(strncmp(s,"echo ",5)==0){gui_shell_append(s+5);gui_shell_append("\n");}
-    else if(strcmp(s,"date")==0)gui_shell_append("2026-04-14 ENGINE\n");
+    else if(strcmp(s,"date")==0)gui_shell_append("2026-04-14 SoftTail\n");
     else if(strcmp(s,"720p")==0){
         if(fb_set_resolution(1280,720)){
             gui_shell_append("Resolution: 1280x720 (720p)\n");
@@ -718,11 +718,11 @@ void gui_open_system_monitor(void){
 
 void gui_open_about(void){
     for(int i=0;i<GUI_MAX_WINDOWS;i++)if(g_wins[i].visible&&g_wins[i].title[0]=='A'){gui_window_set_active(i);return;}
-    int id=gui_window_create(312,190,420,340,"About ENGINE");
+    int id=gui_window_create(312,190,420,340,"About SoftTail");
     if(id<0)return;
     int row_h=GLYPH_H+8;int cy=8;
     gui_widget_add_icon(id,188,cy,3,200);cy+=40;
-    gui_widget_add_label(id,164,cy,"ENGINE",200);cy+=GLYPH_H+2;
+    gui_widget_add_label(id,164,cy,"SoftTail",200);cy+=GLYPH_H+2;
     gui_widget_add_label_dim(id,120,cy,"v0.2 Desktop Environment",201);cy+=GLYPH_H+10;
     gui_widget_add_separator(id,cy,202);cy+=10;
     gui_widget_add_label(id,8,cy,"Arch:  x86-64",203);cy+=row_h;
@@ -1367,8 +1367,8 @@ static void draw_desktop(void){
 
     /* Logo */
     int logo_x=54;
-    draw_text(logo_x,my,"ENGINE",C_ACCENT,1,0);
-    int vbx=logo_x+text_w("ENGINE")+10,vbw=text_w("v0.2")+10;
+    draw_text(logo_x,my,"SoftTail",C_ACCENT,1,0);
+    int vbx=logo_x+text_w("SoftTail")+10,vbw=text_w("v0.2")+10;
     fb_fill_rounded_rect(vbx,my-1,vbw,GLYPH_H+2,blend_color(C_ACCENT,C_BASE,30));
     fb_draw_rounded_rect(vbx,my-1,vbw,GLYPH_H+2,C_ACCENT_DIM);
     draw_text(vbx+5,my,"v0.2",C_ACCENT,1,0);
@@ -1547,7 +1547,7 @@ void gui_init(void){
     }
 
     int term=gui_window_create(500,48,500,680,"Terminal");
-    if(term>=0){g_shell_win_id=term;gui_shell_append("ENGINE v0.2 - Terminal\nType 'help' for commands.\n\n");}
+    if(term>=0){g_shell_win_id=term;gui_shell_append("SoftTail v0.2 - Terminal\nType 'help' for commands.\n\n");}
 
     int settings=gui_window_create(200,100,440,460,"Settings");
     if(settings>=0){int cy=8;gui_widget_add_icon(settings,8,cy,2,300);gui_widget_add_label(settings,48,cy+6,"System Settings",301);cy+=row_h+8;

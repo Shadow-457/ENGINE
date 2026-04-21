@@ -1,5 +1,5 @@
 /* ================================================================
- *  ENGINE OS — kernel/futex.c
+ *  SoftTail OS — kernel/futex.c
  *  Fast userspace mutex primitives (syscall #202)
  *
  *  Implements the minimum futex ops needed for pthreads:

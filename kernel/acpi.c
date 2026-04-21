@@ -1,5 +1,5 @@
 /* ================================================================
- *  ENGINE OS — kernel/acpi.c
+ *  SoftTail OS — kernel/acpi.c
  *  ACPI: RSDP→XSDT/RSDT, FADT (PM1a shutdown/reboot), MADT (IOAPIC),
  *        MCFG (PCIe ECAM), checksum validation.
  * ================================================================ */

@@ -1,8 +1,8 @@
 /* ================================================================
- *  ENGINE OS Browser — browser/render.h
+ *  SoftTail OS Browser — browser/render.h
  *  Framebuffer renderer (Phase 4)
  *
- *  Walks LayoutBox tree and draws everything to the ENGINE OS
+ *  Walks LayoutBox tree and draws everything to the SoftTail OS
  *  framebuffer using the syscall API from gfx.h.
  *  Uses font8x8.h for glyph rendering.
  * ================================================================ */
@@ -192,7 +192,7 @@ children:
         render_box(box->children[i], scroll_y);
 }
 
-/* ── Present to screen via ENGINE OS GFX syscall ─────────────── */
+/* ── Present to screen via SoftTail OS GFX syscall ─────────────── */
 /* sys_gfx_blit(dx, dy, w, h, pixels, colorkey)
  * ABI: rdi=dx, rsi=dy, rdx=w, r10=h, r8=pixels, r9=colorkey    */
 #define SYS_FB_BLIT       312

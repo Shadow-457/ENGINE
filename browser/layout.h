@@ -1,5 +1,5 @@
 /* ================================================================
- *  ENGINE OS Browser — browser/layout.h
+ *  SoftTail OS Browser — browser/layout.h
  *  Box layout engine (Phase 3b)
  *
  *  Walks the styled DOM tree and computes pixel rectangles for

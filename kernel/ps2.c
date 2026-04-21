@@ -1,5 +1,5 @@
 /* ================================================================
- *  ENGINE OS — kernel/ps2.c
+ *  SoftTail OS — kernel/ps2.c
  *  Full PS/2 i8042 keyboard + mouse driver.
  *
  *  Keyboard:

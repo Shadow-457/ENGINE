@@ -1,5 +1,5 @@
 /* ================================================================
- *  ENGINE OS — user/gfx.h
+ *  SoftTail OS — user/gfx.h
  *  Phase 2: Graphics & Rendering — user-space API
  *
  *  Include this header in any user program that wants to draw.

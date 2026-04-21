@@ -148,7 +148,7 @@ dap_buf_seg: .word 0
 dap_lba_lo:  .long 0
 dap_lba_hi:  .long 0
 
-msg_boot: .asciz "ENGINE loading...\r\n"
+msg_boot: .asciz "SoftTail loading...\r\n"
 msg_ok:   .asciz "OK\r\n"
 msg_err:  .asciz "Disk Error!\r\n"
 

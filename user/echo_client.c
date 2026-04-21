@@ -1,5 +1,5 @@
 /* ================================================================
- *  ENGINE OS — user/echo_client.c
+ *  SoftTail OS — user/echo_client.c
  *  Sends a test message to the "echo" server, prints the reply.
  *  Run AFTER echo_server is already running.
  * ================================================================ */

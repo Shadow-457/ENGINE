@@ -1,5 +1,5 @@
 /* ================================================================
- *  ENGINE OS — kernel/nvme.c
+ *  SoftTail OS — kernel/nvme.c
  *  NVMe (Non-Volatile Memory Express) over PCIe driver
  *
  *  NVMe spec 1.4 subset:

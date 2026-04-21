@@ -1,5 +1,5 @@
 /* ================================================================
- *  ENGINE OS — kernel/input.c
+ *  SoftTail OS — kernel/input.c
  *  Phase 1: Input & Controls
  *
  *  Provides three ring-buffer-based input subsystems exposed via

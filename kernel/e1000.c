@@ -1,5 +1,5 @@
 /* ================================================================
- *  ENGINE OS — kernel/e1000.c
+ *  SoftTail OS — kernel/e1000.c
  *  Real network drivers: Intel e1000 (82540EM) + Realtek RTL8139.
  *
  *  Auto-detection order:
@@ -15,7 +15,7 @@
  *  TX/RX for e1000:  16-descriptor rings, DMA into static buffers.
  *  TX/RX for RTL8139: 4-descriptor TX ring, single 64KB RX ring buffer.
  *
- *  All memory is identity-mapped (virt == phys in ENGINE OS).
+ *  All memory is identity-mapped (virt == phys in SoftTail OS).
  * ================================================================ */
 #include "../include/kernel.h"
 
@@ -140,7 +140,7 @@ static void e1k_delay(u32 n) {
 }
 
 static int e1000_init(u64 mmio_phys) {
-    /* Map MMIO (128KB) — identity map in ENGINE OS */
+    /* Map MMIO (128KB) — identity map in SoftTail OS */
     for (u64 off = 0; off < 0x20000; off += PAGE_SIZE)
         vmm_map(read_cr3(), mmio_phys + off, mmio_phys + off,
                 PTE_PRESENT | PTE_WRITE | PTE_NX);

@@ -1,5 +1,5 @@
 /* ================================================================
- *  ENGINE OS — kernel/usb_hid.c
+ *  SoftTail OS — kernel/usb_hid.c
  *  USB HID keyboard + mouse driver.
  *
  *  Strategy:

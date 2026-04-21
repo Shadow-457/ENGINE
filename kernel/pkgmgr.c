@@ -68,7 +68,7 @@ i64 pkg_install(const char *name) {
             print_hex_byte((u8)(packages[i].size >> 8));
             print_hex_byte((u8)packages[i].size);
             print_str(" bytes\r\n");
-            u32 ip = net_dns_resolve("packages.engineos.org");
+            u32 ip = net_dns_resolve("packages.softtailos.org");
             if (ip == 0) {
                 print_str("DNS resolution failed\r\n");
                 return (i64)ENETUNREACH;
@@ -94,7 +94,7 @@ i64 pkg_install(const char *name) {
                 }
                 if (j < PKG_URL_MAX && packages[i].url[j]) req[pos++] = packages[i].url[j];
             }
-            const char *http = " HTTP/1.0\r\nHost: packages.engineos.org\r\n\r\n";
+            const char *http = " HTTP/1.0\r\nHost: packages.softtailos.org\r\n\r\n";
             for (int j = 0; http[j]; j++) req[pos++] = http[j];
             req[pos] = 0;
             sys_send(sock, req, pos, 0);

@@ -1,5 +1,5 @@
 /* ================================================================
- *  ENGINE OS — user/libm.h
+ *  SoftTail OS — user/libm.h
  *  Software math library — drop-in <math.h> replacement.
  *
  *  All functions implemented in pure C using double arithmetic.

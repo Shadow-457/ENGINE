@@ -1,9 +1,9 @@
 /* ================================================================
- *  ENGINE OS — user/i_sound.c
+ *  SoftTail OS — user/i_sound.c
  *  DOOM platform layer: sound
  *
- *  Sound effects  → ENGINE PCM mixer (8 channels, 22050 Hz u8)
- *  Music (MUS)    → ENGINE OPL2 FM synthesis
+ *  Sound effects  → SoftTail PCM mixer (8 channels, 22050 Hz u8)
+ *  Music (MUS)    → SoftTail OPL2 FM synthesis
  *
  *  DOOM's sound engine calls:
  *    I_InitSound / I_ShutdownSound
@@ -22,7 +22,7 @@
 
 /* ── Sound effects ────────────────────────────────────────────── */
 
-/* DOOM SFX channel → ENGINE mixer channel mapping.
+/* DOOM SFX channel → SoftTail mixer channel mapping.
  * DOOM uses up to 8 simultaneous sound channels.               */
 #define SFX_CHANNELS  8
 static int sfx_handle[SFX_CHANNELS];   /* 1 = active */
@@ -77,7 +77,7 @@ int I_StartSound(int id, int vol, int sep, int pitch, int priority) {
              * in I_UpdateSound after we receive the data pointer via
              * I_StartSoundData (our own helper below).              */
             sfx_handle[c] = 1;
-            /* Convert DOOM 0-127 volume to ENGINE 0-255 */
+            /* Convert DOOM 0-127 volume to SoftTail 0-255 */
             snd_volume((unsigned int)c, (unsigned int)(vol * 2));
             return c;
         }
@@ -85,7 +85,7 @@ int I_StartSound(int id, int vol, int sep, int pitch, int priority) {
     return -1;
 }
 
-/* I_StartSoundData — ENGINE-specific helper called from DOOM's S_StartSound
+/* I_StartSoundData — SoftTail-specific helper called from DOOM's S_StartSound
  * after it has a data pointer and length.  Wire this in s_sound.c or call
  * from a wrapper.  Exposed here for completeness.                 */
 void I_StartSoundData(int handle, void *data, int len, int loop) {
@@ -102,7 +102,7 @@ void I_StopSound(int handle) {
 
 int I_SoundIsPlaying(int handle) {
     (void)handle;
-    return 0;  /* ENGINE doesn't expose channel-active query yet */
+    return 0;  /* SoftTail doesn't expose channel-active query yet */
 }
 
 void I_UpdateSoundParams(int handle, int vol, int sep, int pitch) {

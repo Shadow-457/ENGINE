@@ -1,5 +1,5 @@
 /* ================================================================
- *  ENGINE OS — kernel/heap_enhanced.c  (Production-Level Heap)
+ *  SoftTail OS — kernel/heap_enhanced.c  (Production-Level Heap)
  *
  *  Enhancements over the original heap.c:
  *

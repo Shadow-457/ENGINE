@@ -1,5 +1,5 @@
 /* ================================================================
- *  ENGINE OS — kernel/resilience.c
+ *  SoftTail OS — kernel/resilience.c
  *
  *  Four subsystems added together:
  *

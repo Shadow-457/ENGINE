@@ -1,13 +1,13 @@
-# ENGINE OS — Deep Reference Manual
+# SoftTail OS — Deep Reference Manual
 
-> x86-64 monolithic kernel written in C and AT&T assembly.  
+> x86-64 microkernel written in C and AT&T assembly.  
 > Boots from a raw MBR disk image, runs ELF64 user-space binaries, has a GUI, networking, audio, a browser, and its own scripting language.
 
 ---
 
 ## Table of Contents
 
-1. [What Is ENGINE OS?](#1-what-is-engine-os)
+1. [What Is SoftTail OS?](#1-what-is-engine-os)
 2. [Repository Layout](#2-repository-layout)
 3. [Building from Source](#3-building-from-source)
 4. [Disk Image Layout](#4-disk-image-layout)
@@ -64,9 +64,9 @@
 
 ---
 
-## 1. What Is ENGINE OS?
+## 1. What Is SoftTail OS?
 
-ENGINE OS is a from-scratch, x86-64 operating system kernel written entirely in C (kernel) and GNU assembly (boot + ISR stubs). It targets the `qemu-system-x86_64` emulator and any real PC that supports legacy BIOS boot with LBA disk access.
+SoftTail OS is a from-scratch, x86-64 microkernel written entirely in C (kernel) and GNU assembly (boot + ISR stubs). It uses a microkernel architecture with IPC message-passing between components, allowing drivers and services to communicate via well-defined 64-byte messages. It targets the `qemu-system-x86_64` emulator and any real PC that supports legacy BIOS boot with LBA disk access.
 
 **What it has:**
 
@@ -104,7 +104,7 @@ ENGINE OS is a from-scratch, x86-64 operating system kernel written entirely in 
 ## 2. Repository Layout
 
 ```
-ENGINE-patched-v6/
+SoftTail-0.1/
 ├── boot/
 │   └── boot.S          # 512-byte MBR bootloader (16-bit real mode)
 ├── kernel/
@@ -204,7 +204,7 @@ sudo dnf install gcc binutils mtools qemu-system-x86
 
 | Command | What it does |
 |---|---|
-| `make` | Build `engine.img` (bootable disk image) |
+| `make` | Build `softtail.img` (bootable disk image) |
 | `make run` | Build + launch in QEMU (SDL display) |
 | `make run-quiet` | Run with GTK display |
 | `make run-sdl` | Run with SDL display explicitly |
@@ -221,7 +221,7 @@ sudo dnf install gcc binutils mtools qemu-system-x86
 
 ```bash
 git clone <repo>
-cd ENGINE-patched-v6
+cd SoftTail-0.1
 
 # Build kernel + disk image
 make
@@ -237,7 +237,7 @@ make run
 ### QEMU Flags Used
 
 ```
--drive format=raw,file=engine.img,if=ide   # raw disk image via IDE
+-drive format=raw,file=softtail.img,if=ide   # raw disk image via IDE
 -m 128M                                     # 128 MB RAM (increase freely: -m 512M, -m 2G)
 -machine pc,accel=tcg                       # PC machine, software emulation
 -device bochs-display,xres=1024,yres=768   # 1024×768 framebuffer
@@ -247,7 +247,7 @@ make run
 -audiodev sdl,id=snd0
 ```
 
-> **Tip:** To give ENGINE OS more RAM, add `-m 256M` (or any value) to the QEMU run line in the Makefile. The E820 PMM will discover and use all of it automatically.
+> **Tip:** To give SoftTail OS more RAM, add `-m 256M` (or any value) to the QEMU run line in the Makefile. The E820 PMM will discover and use all of it automatically.
 
 ### Compiler Flags Explained
 
@@ -270,7 +270,7 @@ The `-fno-pic` flag is critical. Without it, GCC emits `R_X86_64_REX_GOTPCRELX` 
 ## 4. Disk Image Layout
 
 ```
-engine.img (64 MB raw)
+softtail.img (64 MB raw)
 │
 ├── LBA 0           boot.bin   (512 bytes — MBR bootloader + partition table)
 ├── LBA 1–511       kernel.bin (256 KB — entire kernel, loaded to 0x8000)
@@ -804,7 +804,7 @@ Detected via the standard OPL2 timer test (sets Timer 1, reads status byte).
 
 **File:** `kernel/fbdev.c`
 
-QEMU `bochs-display` device provides a linear framebuffer at a BAR address. ENGINE probes it via PCI, maps the framebuffer, and exposes:
+QEMU `bochs-display` device provides a linear framebuffer at a BAR address. SoftTail probes it via PCI, maps the framebuffer, and exposes:
 
 ```c
 void fb_enable(void);
@@ -936,7 +936,7 @@ An in-memory package registry (no actual download infrastructure yet). `pkg_add(
 
 ## 8. Shell Reference
 
-The ENGINE shell is embedded in `kernel_main()`. It supports a 16-entry command history (Up/Down arrows) and Shift+PageUp/PageDown scrollback (200 rows).
+The SoftTail shell is embedded in `kernel_main()`. It supports a 16-entry command history (Up/Down arrows) and Shift+PageUp/PageDown scrollback (200 rows).
 
 ### File System Commands
 
@@ -1032,7 +1032,7 @@ The ELF entry point `_start`:
 
 ### 9.3 libc.h / libc.c
 
-A near-complete C standard library for ENGINE user programs. Highlights:
+A near-complete C standard library for SoftTail user programs. Highlights:
 
 **Syscall wrappers:** `read`, `write`, `open`, `close`, `exit`, `fork`, `execve`, `waitpid`, `pipe`, `dup`, `dup2`, `kill`, `signal`, `mmap`, `munmap`, `brk`, `socket`, `bind`, `connect`, `listen`, `accept`, `send`, `recv`, `clone`
 
@@ -1169,7 +1169,7 @@ void mix_tick(void);  // call every frame to advance mixer
 #include "libc.h"
 
 int main(void) {
-    write(1, "Hello, ENGINE!\n", 15);
+    write(1, "Hello, SoftTail!\n", 15);
     return 0;
 }
 ```
@@ -1190,8 +1190,8 @@ make addprog PROG=HELLO
 
 # Boot and run
 make run
-# At ENGINE shell:
-# engine:/$ elf HELLO
+# At SoftTail shell:
+# softtail:/$ elf HELLO
 ```
 
 ### Using threads
@@ -1251,7 +1251,7 @@ Link with `user/gfx.h` — no extra `.o` needed (header-only inline wrappers).
 
 **File:** `user/shc.c` (~43 KB)
 
-SHC is a self-hosted scripting language compiler that runs inside ENGINE OS. It compiles `.shadow` source files into native ELF64 binaries.
+SHC is a self-hosted scripting language compiler that runs inside SoftTail OS. It compiles `.shadow` source files into native ELF64 binaries.
 
 ### Building and installing
 
@@ -1278,14 +1278,14 @@ end
 print fib(10)
 ```
 
-### Usage inside ENGINE
+### Usage inside SoftTail
 
 ```
-engine:/$ elf SHC
+softtail:/$ elf SHC
 SHC> (enter source file name, e.g. FIB.SHA)
 FIB.SHA
 (compiles to FIB)
-engine:/$ elf FIB
+softtail:/$ elf FIB
 55
 ```
 
@@ -1398,9 +1398,9 @@ All syscalls use the x86-64 `SYSCALL` instruction. `rax` = syscall number, retur
 
 ## 14. FAQ
 
-**Q: How do I add my own program to ENGINE OS?**
+**Q: How do I add my own program to SoftTail OS?**
 
-A: Compile it as a static ELF64 binary linked at `0x400000`, link with `crt0.o` and `libc.o`, then run `make addprog PROG=./MYBINARY`. At the ENGINE shell, run it with `elf MYBINARY`.
+A: Compile it as a static ELF64 binary linked at `0x400000`, link with `crt0.o` and `libc.o`, then run `make addprog PROG=./MYBINARY`. At the SoftTail shell, run it with `elf MYBINARY`.
 
 ---
 
@@ -1410,13 +1410,13 @@ A: Without it, GCC emits `R_X86_64_REX_GOTPCRELX` relocations for extern functio
 
 ---
 
-**Q: Can I run Linux ELF binaries in ENGINE OS?**
+**Q: Can I run Linux ELF binaries in SoftTail OS?**
 
-A: Not directly. ENGINE has a Linux-compatible syscall numbering, but it does not implement dynamic linking (`ld-linux.so`), `procfs`, or the full kernel ABI. Static ELF binaries that use only the implemented syscalls (most things in the table above) will generally work if compiled with the ENGINE libc or a compatible minimal libc.
+A: Not directly. SoftTail has a Linux-compatible syscall numbering, but it does not implement dynamic linking (`ld-linux.so`), `procfs`, or the full kernel ABI. Static ELF binaries that use only the implemented syscalls (most things in the table above) will generally work if compiled with the SoftTail libc or a compatible minimal libc.
 
 ---
 
-**Q: How much RAM can ENGINE OS use?**
+**Q: How much RAM can SoftTail OS use?**
 
 A: Any amount QEMU is given (via `-m`). The bootloader runs `INT 15h/E820` to query the full BIOS memory map, and the PMM feeds every usable page into the buddy allocator. There is a compile-time ceiling of `RAM_END_MAX = 64 GB` for static bitmap sizing, but runtime can go much higher with a recompile.
 
@@ -1514,7 +1514,7 @@ nvme_read_4k(0, buf4k);           // reads LBAs 0–7
 
 ---
 
-**Q: What display resolution does ENGINE OS support?**
+**Q: What display resolution does SoftTail OS support?**
 
 A: Default is **1024×768** (set in QEMU with `-device bochs-display,xres=1024,yres=768`). From the shell, `720p` switches to 1280×720 and `1080p` switches to 1920×1080. The framebuffer is a 32-bit linear RGBA/RGBX surface.
 
@@ -1522,11 +1522,11 @@ A: Default is **1024×768** (set in QEMU with `-device bochs-display,xres=1024,y
 
 **Q: How do I build the SHC scripting compiler?**
 
-A: `make compiler` builds SHC and injects it along with sample `.shadow` files into the FAT32 partition. Boot ENGINE and run `elf SHC` at the shell.
+A: `make compiler` builds SHC and injects it along with sample `.shadow` files into the FAT32 partition. Boot SoftTail and run `elf SHC` at the shell.
 
 ---
 
-**Q: Does ENGINE OS support SMP (multiple CPU cores)?**
+**Q: Does SoftTail OS support SMP (multiple CPU cores)?**
 
 A: Partially. `smp_init()` sends INIT+SIPI signals to all Application Processors found in the ACPI MADT, and they enter 64-bit mode. However, only core 0 (the Bootstrap Processor) runs the scheduler and handles interrupts. The APs spin-wait. Full SMP scheduling is on the roadmap.
 
@@ -1538,7 +1538,7 @@ A: When `fork()` is called, `vmm_cow_fork()` walks the parent's page tables. Eve
 
 ---
 
-**Q: Can ENGINE OS boot on real hardware?**
+**Q: Can SoftTail OS boot on real hardware?**
 
 A: Theoretically yes, for machines with a legacy BIOS and an IDE/SATA controller that BIOS presents as an INT 13h LBA drive. In practice:
 - The E1000 NIC driver targets QEMU's specific device ID (`0x8086:0x100E`) — real E1000 cards use different IDs
@@ -1584,4 +1584,4 @@ Based on the `work.md` dev log, all items from the browser porting checklist are
 
 ---
 
-*ENGINE OS — built from scratch, one page fault at a time.*
+*SoftTail OS — built from scratch, one page fault at a time.*

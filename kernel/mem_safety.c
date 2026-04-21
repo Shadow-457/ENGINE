@@ -1,5 +1,5 @@
 /* ================================================================
- *  ENGINE OS — kernel/mem_safety.c  (Memory Safety Features)
+ *  SoftTail OS — kernel/mem_safety.c  (Memory Safety Features)
  *
  *  Production-level memory safety features for kernel space:
  *

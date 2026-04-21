@@ -1,5 +1,5 @@
 /* ================================================================
- *  ENGINE OS — kernel/elf.c  (PATCHED)
+ *  SoftTail OS — kernel/elf.c  (PATCHED)
  *
  *  Fix Bug 4: elf_load() previously wrote PT_LOAD segments directly
  *  to ph->vaddr using memcpy, which only works in the kernel's own

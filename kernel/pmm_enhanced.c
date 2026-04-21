@@ -1,5 +1,5 @@
 /* ================================================================
- *  ENGINE OS — kernel/pmm_enhanced.c  (Production-Level PMM)
+ *  SoftTail OS — kernel/pmm_enhanced.c  (Production-Level PMM)
  *
  *  Enhancements over the original pmm.c:
  *

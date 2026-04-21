@@ -1,5 +1,5 @@
 /* ================================================================
- *  ENGINE OS — kernel/fbdev.c
+ *  SoftTail OS — kernel/fbdev.c
  *  VESA VBE 2.0/3.0 framebuffer driver.
  *  Uses the Bochs/VBE dispi I/O interface (ports 0x01CE/0x01CF)
  *  which QEMU's std VGA emulates. Sets 1024x768x32bpp.

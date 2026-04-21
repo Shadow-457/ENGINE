@@ -1,5 +1,5 @@
 /* ================================================================
- *  ENGINE OS — kernel/heap.c  (v2: Slab Allocator)
+ *  SoftTail OS — kernel/heap.c  (v2: Slab Allocator)
  *
  *  Replaces the old first-fit free-list with a two-tier system
  *  matching Linux's kmalloc/slab design:

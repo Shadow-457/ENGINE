@@ -1,8 +1,8 @@
 /* ================================================================
- *  ENGINE OS — user/malloc.c  (Production User-Space Allocator)
+ *  SoftTail OS — user/malloc.c  (Production User-Space Allocator)
  *
  *  A dlmalloc-style allocator with segregated free lists (bins).
- *  Designed for user-space programs running on ENGINE OS.
+ *  Designed for user-space programs running on SoftTail OS.
  *
  *  Features:
  *    - Segregated free lists (8 bins for different size ranges)

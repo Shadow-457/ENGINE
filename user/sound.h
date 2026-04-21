@@ -1,5 +1,5 @@
 /* ================================================================
- *  ENGINE OS — user/sound.h
+ *  SoftTail OS — user/sound.h
  *  Phase 3: Audio — user-space API
  *
  *  Two paths:

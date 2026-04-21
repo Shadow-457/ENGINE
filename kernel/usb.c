@@ -1,5 +1,5 @@
 /* ================================================================
- *  ENGINE OS — kernel/usb.c
+ *  SoftTail OS — kernel/usb.c
  *  USB subsystem: EHCI host controller + XHCI full slot enumeration
  *  + USB Mass Storage (Bulk-Only Transport / SCSI transparent)
  *

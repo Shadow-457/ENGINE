@@ -1,6 +1,6 @@
 /* ================================================================
- *  ENGINE OS — user/libc.h
- *  Basic C library for user programs running on ENGINE OS.
+ *  SoftTail OS — user/libc.h
+ *  Basic C library for user programs running on SoftTail OS.
  *
  *  Usage:
  *    #include "libc.h"

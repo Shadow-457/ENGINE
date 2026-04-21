@@ -1531,7 +1531,7 @@ static void cmd_uptime(void) {
 }
 
 static void cmd_uname(void) {
-    print_str("ENGINE 0.1 x86-64 (preemptive, FAT32, ring-3 ELF)\r\n");
+    print_str("SoftTail 0.1 x86-64 (microkernel, preemptive, FAT32, ring-3 ELF)\r\n");
 }
 
 /* ================================================================
@@ -2363,11 +2363,11 @@ static void cmd_gui(void) {
 }
 
 static void cmd_shc_info(void) {
-    print_str("ENGINE Compiler (SHC) is installed on this disk.\r\n\r\n");
+    print_str("SoftTail Compiler (SHC) is installed on this disk.\r\n\r\n");
     print_str("Usage:\r\n");
     print_str("  elf SHC              launch the compiler\r\n");
     print_str("  (enter filename)     e.g. PROG.SHA\r\n\r\n");
-    print_str("ENGINE language syntax:\r\n");
+    print_str("SoftTail language syntax:\r\n");
     print_str("  set x to 10         set y to x + 5\r\n");
     print_str("  if x greater y then ... else ... end\r\n");
     print_str("  repeat while x greater 0 ... end\r\n");
@@ -2588,14 +2588,14 @@ void kernel_main(void) {
     watchdog_init();
 
     print_str("========================================\r\n");
-    print_str("  ENGINE v0.1\r\n");
+    print_str("  SoftTail v0.1\r\n");
     print_str("  x86-64 | preemptive | FAT32 | ring-3\r\n");
     print_str("  Type 'help' for available commands.\r\n");
     print_str("========================================\r\n");
 
     for (;;) {
         watchdog_pet();   /* kernel idle/shell is alive */
-        print_str("engine:");
+        print_str("softtail:");
         print_str(cwd_path);
         print_str("$ ");
         read_line(input_buf, sizeof(input_buf));
