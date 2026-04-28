@@ -1,18 +1,264 @@
-/* ================================================================
- *  Systrix OS — libc/systrix_libc.c
+/* ═══════════════════════════════════════════════════════════════════════
+ *  SystrixOS — libc/systrix_libc.c
  *  Unified C library implementation — kernel AND user space.
  *
  *  Build flags expected:
- *    Kernel:  -ffreestanding -nostdlib -nostdinc -O2
- *    User:    -ffreestanding -nostdlib -nostdinc -O2
+ *    Kernel: -ffreestanding -nostdlib -nostdinc -DSYSTRIX_KERNEL -O2
+ *    User:   -ffreestanding -nostdlib -nostdinc -O2
  *
  *  No #include of anything outside this directory.
- * ================================================================ */
+ *
+ *  SECTION ORDER (matches systrix_libc.h — keep in sync!):
+ *   §1  Output sink (raw write to stderr / kputs)
+ *   §2  Debug, Assert, Panic implementations  ← NEW
+ *   §3  Memory
+ *   §4  String — length / comparison
+ *   §5  String — copy
+ *   §6  String — concatenation
+ *   §7  String — search
+ *   §8  Character classification
+ *   §9  Integer conversion
+ *   §10 Numeric helpers
+ *   §11 Integer-to-string helpers
+ *   §12 Formatted output (slibc_vprintf_cb + snprintf family)
+ *   §13 Sorting / searching (qsort, bsearch)
+ *   §14 strerror — human-readable error messages
+ *   §15 Integer math & bit manipulation
+ *   §16 String extras
+ *   §17 Hashing (FNV-1a, MurmurHash3, CRC-32, Adler-32)
+ *   §18 PRNG (splitmix64 + xorshift64)
+ *   §19 Ring buffer
+ *   §20 Bitmap
+ *   §21 Formatting helpers (bytes, duration, IPv4, MAC, progress)
+ *   §22 Dynamic string builder (SStrBuf)
+ *   §23 Path utilities
+ *   §24 UUID v4
+ * ═══════════════════════════════════════════════════════════════════════ */
+
 #include "systrix_libc.h"
 
-/* ================================================================
- *  Memory
- * ================================================================ */
+
+/* ═══════════════════════════════════════════════════════════════════════
+ *  §1  Raw output sink
+ *
+ *  All debug/panic output flows through slibc_debug_puts() and
+ *  slibc_debug_printf(). In kernel builds, kputs() is used.
+ *  In user builds, write() syscall (fd 2 = stderr) is used.
+ *
+ *  CONTRIBUTOR: if you add a new output channel (serial, VGA, etc.),
+ *  wire it in here — you don't need to touch any of the debug macros.
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+#ifdef SYSTRIX_KERNEL
+
+/* Kernel provides kprintf() */
+extern void kprintf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+
+static void kputs(const char *s) { kprintf("%s", s); }
+static void kputc(char c)        { kprintf("%c", c); }
+
+void slibc_debug_puts(const char *s) {
+    kputs(s);
+}
+
+#else  /* user space */
+
+/* Use write(2, buf, len) syscall directly — no libc dependency */
+static void _raw_write(const char *buf, size_t len) {
+    /* syscall: write(fd=2, buf, len) */
+    __asm__ volatile(
+        "syscall"
+        :
+        : "D"((long)2),          /* rdi = fd = stderr */
+          "S"(buf),              /* rsi = buf         */
+          "d"(len),              /* rdx = len         */
+          "a"((long)1)           /* rax = SYS_write   */
+        : "rcx", "r11", "memory"
+    );
+}
+
+void slibc_debug_puts(const char *s) {
+    if (!s) return;
+    size_t n = 0;
+    while (s[n]) n++;
+    _raw_write(s, n);
+}
+
+#endif /* SYSTRIX_KERNEL */
+
+void slibc_debug_printf(const char *fmt, ...) {
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (n > 0) slibc_debug_puts(buf);
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════
+ *  §2  Debug, Assert, and Panic implementations
+ *
+ *  These produce human-readable output, NOT register numbers.
+ *
+ *  Output examples:
+ *
+ *  PANIC:
+ *    ╔══════════════════════════════════════════════════════╗
+ *    ║  SYSTRIX PANIC                                       ║
+ *    ╚══════════════════════════════════════════════════════╝
+ *    Location : myfile.c : 42 in my_function()
+ *    Reason   : out of memory allocating page table
+ *
+ *  ASSERT FAILED:
+ *    ╔══════════════════════════════════════════════════════╗
+ *    ║  SYSTRIX ASSERT FAILED                               ║
+ *    ╚══════════════════════════════════════════════════════╝
+ *    Location  : myfile.c : 42 in my_function()
+ *    Condition : ptr != NULL
+ *    Message   : pointer must not be null here
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+/* Write an integer as decimal to stderr without using snprintf
+   (safe to call even if snprintf itself panics) */
+static void _write_dec(long long v) {
+    char buf[24];
+    int n = 0;
+    if (v < 0) { slibc_debug_puts("-"); v = -v; }
+    if (v == 0) { slibc_debug_puts("0"); return; }
+    unsigned long long u = (unsigned long long)v;
+    while (u) { buf[n++] = (char)('0' + u % 10); u /= 10; }
+    /* reverse */
+    char rev[24];
+    for (int i = 0; i < n; i++) rev[i] = buf[n - 1 - i];
+    rev[n] = '\0';
+    slibc_debug_puts(rev);
+}
+
+/* Print the panic / assert banner */
+static void _print_banner(const char *title) {
+    slibc_debug_puts("\n");
+    slibc_debug_puts("╔══════════════════════════════════════════════════════╗\n");
+    slibc_debug_puts("║  ");
+    slibc_debug_puts(title);
+    slibc_debug_puts("\n");
+    slibc_debug_puts("╚══════════════════════════════════════════════════════╝\n");
+}
+
+__attribute__((noreturn))
+void slibc_panic_impl(const char *file, int line,
+                      const char *func, const char *msg) {
+    _print_banner("SYSTRIX PANIC");
+    slibc_debug_puts("Location : ");
+    slibc_debug_puts(file ? file : "?");
+    slibc_debug_puts(" : ");
+    _write_dec(line);
+    slibc_debug_puts(" in ");
+    slibc_debug_puts(func ? func : "?");
+    slibc_debug_puts("()\n");
+    slibc_debug_puts("Reason   : ");
+    slibc_debug_puts(msg ? msg : "(no message)");
+    slibc_debug_puts("\n\n");
+
+#ifdef SYSTRIX_KERNEL
+    /* Halt the CPU in the kernel */
+    __asm__ volatile("cli; hlt" ::: "memory");
+    __builtin_unreachable();
+#else
+    /* User space: call _exit(1) via syscall */
+    __asm__ volatile(
+        "syscall"
+        :
+        : "D"((long)1),   /* exit code = 1 */
+          "a"((long)60)   /* SYS_exit       */
+        :
+    );
+    __builtin_unreachable();
+#endif
+}
+
+__attribute__((noreturn))
+void slibc_assert_impl(const char *file, int line, const char *func,
+                       const char *cond_str, const char *msg) {
+    _print_banner("SYSTRIX ASSERT FAILED");
+    slibc_debug_puts("Location  : ");
+    slibc_debug_puts(file ? file : "?");
+    slibc_debug_puts(" : ");
+    _write_dec(line);
+    slibc_debug_puts(" in ");
+    slibc_debug_puts(func ? func : "?");
+    slibc_debug_puts("()\n");
+    slibc_debug_puts("Condition : ");
+    slibc_debug_puts(cond_str ? cond_str : "?");
+    slibc_debug_puts("\n");
+    slibc_debug_puts("Message   : ");
+    slibc_debug_puts(msg ? msg : "(no message)");
+    slibc_debug_puts("\n\n");
+    slibc_panic_impl(file, line, func, "assertion failure (see above)");
+}
+
+__attribute__((noreturn))
+void slibc_assert_range_impl(const char *file, int line, const char *func,
+                              const char *name, long long val,
+                              long long lo, long long hi) {
+    char msg[128];
+    /* Build message: "value N is out of range [lo, hi]" */
+    snprintf(msg, sizeof(msg),
+             "value %lld is out of range [%lld, %lld]", val, lo, hi);
+
+    char cond[64];
+    snprintf(cond, sizeof(cond), "%s in range [%lld, %lld]", name, lo, hi);
+
+    slibc_assert_impl(file, line, func, cond, msg);
+}
+
+/*
+ * slibc_hexdump_impl — dump memory as hex + printable ASCII.
+ *
+ * Output format (16 bytes per line):
+ *   [HEXDUMP myfile.c:42] label (N bytes):
+ *   0000: 48 65 6c 6c  6f 20 57 6f  72 6c 64 0a  00 00 00 00  Hello Wo rld.....
+ */
+void slibc_hexdump_impl(const char *file, int line, const char *label,
+                        const void *buf, size_t len) {
+    const uint8_t *p = (const uint8_t *)buf;
+    char line_buf[128];
+
+    slibc_debug_printf("[HEXDUMP %s:%d] %s (%zu bytes):\n",
+                       file, line, label ? label : "", len);
+
+    for (size_t offset = 0; offset < len; offset += 16) {
+        /* offset */
+        snprintf(line_buf, 8, "%04zx: ", offset);
+        slibc_debug_puts(line_buf);
+
+        /* hex bytes, grouped as 4+4+4+4 */
+        for (size_t i = 0; i < 16; i++) {
+            if (offset + i < len)
+                slibc_debug_printf("%02x ", p[offset + i]);
+            else
+                slibc_debug_puts("   ");
+            if (i == 3 || i == 7 || i == 11)
+                slibc_debug_puts(" ");
+        }
+
+        slibc_debug_puts(" ");
+
+        /* ASCII column */
+        for (size_t i = 0; i < 16 && offset + i < len; i++) {
+            uint8_t c = p[offset + i];
+            slibc_debug_puts((c >= 0x20 && c <= 0x7e)
+                             ? (char[]){(char)c, '\0'}
+                             : ".");
+        }
+        slibc_debug_puts("\n");
+    }
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════
+ *  §3  Memory
+ * ═══════════════════════════════════════════════════════════════════════ */
 
 void *memset(void *dst, int c, size_t n) {
     unsigned char *p = (unsigned char *)dst;
@@ -54,9 +300,10 @@ void *memchr(const void *s, int c, size_t n) {
     return NULL;
 }
 
-/* ================================================================
- *  String — length / comparison
- * ================================================================ */
+
+/* ═══════════════════════════════════════════════════════════════════════
+ *  §4  String — length / comparison
+ * ═══════════════════════════════════════════════════════════════════════ */
 
 size_t strlen(const char *s) {
     size_t n = 0;
@@ -96,9 +343,10 @@ int strncasecmp(const char *a, const char *b, size_t n) {
     return tolower((unsigned char)*a) - tolower((unsigned char)*b);
 }
 
-/* ================================================================
- *  String — copy
- * ================================================================ */
+
+/* ═══════════════════════════════════════════════════════════════════════
+ *  §5  String — copy
+ * ═══════════════════════════════════════════════════════════════════════ */
 
 char *strcpy(char *dst, const char *src) {
     char *d = dst;
@@ -113,7 +361,8 @@ char *strncpy(char *dst, const char *src, size_t n) {
     return dst;
 }
 
-/* strlcpy: always NUL-terminates; returns strlen(src) */
+/* strlcpy: always NUL-terminates; returns strlen(src).
+ * Prefer this over strcpy/strncpy everywhere. */
 size_t strlcpy(char *dst, const char *src, size_t sz) {
     size_t i = 0;
     if (sz > 0) {
@@ -124,9 +373,10 @@ size_t strlcpy(char *dst, const char *src, size_t sz) {
     return i;
 }
 
-/* ================================================================
- *  String — concatenation
- * ================================================================ */
+
+/* ═══════════════════════════════════════════════════════════════════════
+ *  §6  String — concatenation
+ * ═══════════════════════════════════════════════════════════════════════ */
 
 char *strcat(char *dst, const char *src) {
     char *d = dst;
@@ -143,7 +393,8 @@ char *strncat(char *dst, const char *src, size_t n) {
     return dst;
 }
 
-/* strlcat: always NUL-terminates; returns total desired length */
+/* strlcat: always NUL-terminates; returns total desired length.
+ * Prefer this over strcat/strncat everywhere. */
 size_t strlcat(char *dst, const char *src, size_t sz) {
     size_t dl = 0;
     while (dl < sz && dst[dl]) dl++;
@@ -154,9 +405,10 @@ size_t strlcat(char *dst, const char *src, size_t sz) {
     return dl + sl;
 }
 
-/* ================================================================
- *  String — search
- * ================================================================ */
+
+/* ═══════════════════════════════════════════════════════════════════════
+ *  §7  String — search
+ * ═══════════════════════════════════════════════════════════════════════ */
 
 char *strchr(const char *s, int c) {
     for (; *s; s++)
@@ -210,7 +462,7 @@ size_t strcspn(const char *s, const char *reject) {
     return n;
 }
 
-/* strtok — NOT thread-safe (uses internal static pointer) */
+/* strtok — NOT thread-safe. Use strtok_r in new code. */
 char *strtok(char *s, const char *delim) {
     static char *saved = NULL;
     return strtok_r(s, delim, &saved);
@@ -240,9 +492,10 @@ char *strtok_r(char *s, const char *delim, char **saveptr) {
     return tok;
 }
 
-/* ================================================================
- *  Character classification
- * ================================================================ */
+
+/* ═══════════════════════════════════════════════════════════════════════
+ *  §8  Character classification
+ * ═══════════════════════════════════════════════════════════════════════ */
 
 int isdigit (int c) { return c >= '0' && c <= '9'; }
 int isxdigit(int c) { return isdigit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); }
@@ -257,9 +510,10 @@ int iscntrl (int c) { return (c >= 0 && c < 0x20) || c == 0x7f; }
 int toupper (int c) { return islower(c) ? c - ('a' - 'A') : c; }
 int tolower (int c) { return isupper(c) ? c + ('a' - 'A') : c; }
 
-/* ================================================================
- *  Integer conversion
- * ================================================================ */
+
+/* ═══════════════════════════════════════════════════════════════════════
+ *  §9  Integer conversion
+ * ═══════════════════════════════════════════════════════════════════════ */
 
 static int _skip_ws_sign(const char **sp) {
     const char *s = *sp;
@@ -294,7 +548,6 @@ long long strtoll(const char *s, char **endptr, int base) {
 }
 
 unsigned long long strtoull(const char *s, char **endptr, int base) {
-    /* ignore sign for unsigned — but skip it */
     while (isspace((unsigned char)*s)) s++;
     int neg = (*s == '-'); if (neg || *s == '+') s++;
     if (base == 0) {
@@ -326,21 +579,23 @@ unsigned long strtoul(const char *s, char **endptr, int base) {
     return (unsigned long)strtoull(s, endptr, base);
 }
 
-int      atoi (const char *s) { return (int) strtol(s, NULL, 10); }
-long     atol (const char *s) { return       strtol(s, NULL, 10); }
+int       atoi (const char *s) { return (int)strtol(s, NULL, 10); }
+long      atol (const char *s) { return      strtol(s, NULL, 10); }
 long long atoll(const char *s) { return      strtoll(s, NULL, 10); }
 
-/* ================================================================
- *  Numeric helpers
- * ================================================================ */
+
+/* ═══════════════════════════════════════════════════════════════════════
+ *  §10  Numeric helpers
+ * ═══════════════════════════════════════════════════════════════════════ */
 
 int       abs  (int x)       { return x < 0 ? -x : x; }
 long      labs (long x)      { return x < 0 ? -x : x; }
 long long llabs(long long x) { return x < 0 ? -x : x; }
 
-/* ================================================================
- *  Integer-to-string helpers
- * ================================================================ */
+
+/* ═══════════════════════════════════════════════════════════════════════
+ *  §11  Integer-to-string helpers
+ * ═══════════════════════════════════════════════════════════════════════ */
 
 int slibc_u64_to_dec(uint64_t v, char *buf) {
     if (v == 0) { buf[0] = '0'; buf[1] = '\0'; return 1; }
@@ -371,11 +626,16 @@ int slibc_u64_to_HEX(uint64_t v, char *buf) {
     return n;
 }
 
-/* ================================================================
- *  Formatted output — core engine
- *  slibc_vprintf_cb: calls cb(ctx, c) for every output character.
- *  All other printf variants are built on top of this.
- * ================================================================ */
+
+/* ═══════════════════════════════════════════════════════════════════════
+ *  §12  Formatted output
+ *
+ *  slibc_vprintf_cb is the core engine. All other printf variants call it.
+ *  cb(ctx, c) is invoked once per output character.
+ *
+ *  Supported: %d %i %u %x %X %o %c %s %p %% with width/prec/flags.
+ *  Not supported: %f %e %g (no floating-point in freestanding env).
+ * ═══════════════════════════════════════════════════════════════════════ */
 
 int slibc_vprintf_cb(slibc_putc_fn cb, void *ctx,
                      const char *fmt, va_list ap) {
@@ -385,14 +645,14 @@ int slibc_vprintf_cb(slibc_putc_fn cb, void *ctx,
         if (*fmt != '%') { cb(ctx, *fmt++); total++; continue; }
         fmt++;
 
-        /* ── flags ─────────────────────────────────────────── */
+        /* flags */
         int flag_left  = 0;   /* '-' : left-justify          */
         int flag_zero  = 0;   /* '0' : zero-pad              */
         int flag_plus  = 0;   /* '+' : always show sign      */
         int flag_space = 0;   /* ' ' : space before positive */
         int flag_hash  = 0;   /* '#' : alt form (0x prefix)  */
         for (;;) {
-            if (*fmt == '-')      { flag_left  = 1; fmt++; }
+            if      (*fmt == '-') { flag_left  = 1; fmt++; }
             else if (*fmt == '0') { flag_zero  = 1; fmt++; }
             else if (*fmt == '+') { flag_plus  = 1; fmt++; }
             else if (*fmt == ' ') { flag_space = 1; fmt++; }
@@ -400,32 +660,33 @@ int slibc_vprintf_cb(slibc_putc_fn cb, void *ctx,
             else break;
         }
 
-        /* ── width ─────────────────────────────────────────── */
+        /* width */
         int width = 0;
-        if (*fmt == '*') { width = va_arg(ap, int); fmt++; if (width < 0) { flag_left = 1; width = -width; } }
-        else while (*fmt >= '0' && *fmt <= '9') width = width * 10 + (*fmt++ - '0');
+        if (*fmt == '*') {
+            width = va_arg(ap, int); fmt++;
+            if (width < 0) { flag_left = 1; width = -width; }
+        } else {
+            while (*fmt >= '0' && *fmt <= '9') width = width * 10 + (*fmt++ - '0');
+        }
 
-        /* ── precision ─────────────────────────────────────── */
+        /* precision */
         int prec = -1;
         if (*fmt == '.') {
-            fmt++;
-            prec = 0;
+            fmt++; prec = 0;
             if (*fmt == '*') { prec = va_arg(ap, int); fmt++; }
             else while (*fmt >= '0' && *fmt <= '9') prec = prec * 10 + (*fmt++ - '0');
         }
 
-        /* ── length modifier ───────────────────────────────── */
+        /* length modifier */
         int lng = 0;  /* 0=int, 1=long, 2=long long */
-        if (*fmt == 'l') { lng = 1; fmt++; if (*fmt == 'l') { lng = 2; fmt++; } }
-        else if (*fmt == 'h') { fmt++; if (*fmt == 'h') fmt++; } /* hh/h: treat as int */
-        else if (*fmt == 'z') { lng = 1; fmt++; } /* size_t ~ long */
+        if      (*fmt == 'l') { lng = 1; fmt++; if (*fmt == 'l') { lng = 2; fmt++; } }
+        else if (*fmt == 'h') { fmt++; if (*fmt == 'h') fmt++; }
+        else if (*fmt == 'z') { lng = 1; fmt++; }  /* size_t */
 
         char spec = *fmt++;
-
-        /* ── %% ─────────────────────────────────────────────── */
         if (spec == '%') { cb(ctx, '%'); total++; continue; }
 
-        /* ── %c ─────────────────────────────────────────────── */
+        /* %c */
         if (spec == 'c') {
             char cv = (char)va_arg(ap, int);
             if (!flag_left) for (int i = 1; i < width; i++) { cb(ctx, ' '); total++; }
@@ -434,7 +695,7 @@ int slibc_vprintf_cb(slibc_putc_fn cb, void *ctx,
             continue;
         }
 
-        /* ── %s ─────────────────────────────────────────────── */
+        /* %s */
         if (spec == 's') {
             const char *sv = va_arg(ap, const char *);
             if (!sv) sv = "(null)";
@@ -445,12 +706,11 @@ int slibc_vprintf_cb(slibc_putc_fn cb, void *ctx,
             continue;
         }
 
-        /* ── numeric ────────────────────────────────────────── */
-        uint64_t uval; int neg = 0; int is_ptr = 0;
+        /* numeric */
+        uint64_t uval; int neg = 0;
         if (spec == 'p') {
-            uval   = (uint64_t)(uintptr_t)va_arg(ap, void *);
-            spec   = 'x';
-            is_ptr = 1;
+            uval      = (uint64_t)(uintptr_t)va_arg(ap, void *);
+            spec      = 'x';
             flag_hash = 1;
         } else if (spec == 'd' || spec == 'i') {
             int64_t sv = (lng == 2) ? (int64_t)va_arg(ap, long long)
@@ -465,35 +725,32 @@ int slibc_vprintf_cb(slibc_putc_fn cb, void *ctx,
 
         unsigned int base = (spec == 'x' || spec == 'X') ? 16u
                           : (spec == 'o') ? 8u : 10u;
-        const char *digs = (spec == 'X') ? "0123456789ABCDEF"
-                                         : "0123456789abcdef";
+        const char *digs  = (spec == 'X') ? "0123456789ABCDEF"
+                                          : "0123456789abcdef";
 
         /* build digits in reverse */
         char tmp[24]; int tlen = 0;
         if (uval == 0) { tmp[tlen++] = '0'; }
         else { uint64_t v = uval; while (v) { tmp[tlen++] = digs[v % base]; v /= base; } }
 
-        /* sign / prefix characters */
+        /* sign / prefix */
         char prefix[4]; int plen = 0;
-        if (neg)                                    prefix[plen++] = '-';
-        else if (flag_plus)                         prefix[plen++] = '+';
-        else if (flag_space)                        prefix[plen++] = ' ';
+        if (neg)             prefix[plen++] = '-';
+        else if (flag_plus)  prefix[plen++] = '+';
+        else if (flag_space) prefix[plen++] = ' ';
         if (flag_hash && (spec == 'x' || spec == 'X') && uval != 0)
             { prefix[plen++] = '0'; prefix[plen++] = (spec == 'X') ? 'X' : 'x'; }
         else if (flag_hash && spec == 'o' && (tlen == 0 || tmp[tlen-1] != '0'))
             prefix[plen++] = '0';
-        (void)is_ptr; /* covered by flag_hash above */
 
         int numw = tlen + plen;
         char pad = (!flag_left && flag_zero) ? '0' : ' ';
 
         if (!flag_left && pad == ' ')
             for (int i = numw; i < width; i++) { cb(ctx, ' '); total++; }
-        /* print prefix */
         for (int i = 0; i < plen; i++) { cb(ctx, prefix[i]); total++; }
         if (!flag_left && pad == '0')
             for (int i = numw; i < width; i++) { cb(ctx, '0'); total++; }
-        /* print digits (stored reversed) */
         for (int i = tlen - 1; i >= 0; i--) { cb(ctx, tmp[i]); total++; }
         if (flag_left)
             for (int i = numw; i < width; i++) { cb(ctx, ' '); total++; }
@@ -501,8 +758,6 @@ int slibc_vprintf_cb(slibc_putc_fn cb, void *ctx,
 
     return total;
 }
-
-/* ── snprintf / sprintf ──────────────────────────────────────────── */
 
 typedef struct { char *p; size_t rem; } _snbuf;
 
@@ -520,7 +775,6 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap) {
 }
 
 int vsprintf(char *buf, const char *fmt, va_list ap) {
-    /* unbounded — caller must ensure buffer is large enough */
     return vsnprintf(buf, (size_t)-1, fmt, ap);
 }
 
@@ -538,35 +792,35 @@ int sprintf(char *buf, const char *fmt, ...) {
     return r;
 }
 
-/* ================================================================
- *  Sorting / searching
- * ================================================================ */
 
-/* qsort — iterative quicksort (no recursion → safe in kernel) */
-static void _swap(unsigned char *a, unsigned char *b, size_t sz) {
+/* ═══════════════════════════════════════════════════════════════════════
+ *  §13  Sorting / searching
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+static void _swap_bytes(unsigned char *a, unsigned char *b, size_t sz) {
     for (size_t i = 0; i < sz; i++) {
         unsigned char t = a[i]; a[i] = b[i]; b[i] = t;
     }
 }
 
-/* Insertion sort for small sub-arrays */
+/* Insertion sort for small sub-arrays (avoids function-call overhead) */
 static void _isort(unsigned char *base, size_t nmemb, size_t sz,
                    int (*cmp)(const void *, const void *)) {
     for (size_t i = 1; i < nmemb; i++) {
         size_t j = i;
         while (j > 0 && cmp(base + (j-1)*sz, base + j*sz) > 0) {
-            _swap(base + (j-1)*sz, base + j*sz, sz);
+            _swap_bytes(base + (j-1)*sz, base + j*sz, sz);
             j--;
         }
     }
 }
 
-#define QSORT_STACK 64
+#define QSORT_STACK 64  /* max recursion depth = 64 levels → 2^64 elements */
+
 void qsort(void *base, size_t nmemb, size_t sz,
            int (*cmp)(const void *, const void *)) {
     if (nmemb < 2 || sz == 0) return;
     unsigned char *b = (unsigned char *)base;
-    /* Stack stores (lo, hi) pairs — each entry = one sub-array */
     size_t lo_stk[QSORT_STACK], hi_stk[QSORT_STACK];
     int top = 0;
     lo_stk[top] = 0; hi_stk[top] = nmemb - 1; top++;
@@ -574,26 +828,26 @@ void qsort(void *base, size_t nmemb, size_t sz,
         top--;
         size_t lo = lo_stk[top], hi = hi_stk[top];
         if (hi <= lo) continue;
+        /* use insertion sort for small arrays (faster in practice) */
         if (hi - lo < 8) { _isort(b + lo*sz, hi - lo + 1, sz, cmp); continue; }
-        /* median-of-three pivot */
+        /* median-of-three pivot selection */
         size_t mid = lo + (hi - lo) / 2;
-        if (cmp(b + lo*sz, b + mid*sz) > 0) _swap(b + lo*sz, b + mid*sz, sz);
-        if (cmp(b + lo*sz, b + hi*sz)  > 0) _swap(b + lo*sz, b + hi*sz,  sz);
-        if (cmp(b + mid*sz, b + hi*sz) > 0) _swap(b + mid*sz, b + hi*sz, sz);
-        /* pivot is now at mid; put it at hi-1 */
-        _swap(b + mid*sz, b + (hi-1)*sz, sz);
+        if (cmp(b + lo*sz,  b + mid*sz) > 0) _swap_bytes(b + lo*sz,  b + mid*sz, sz);
+        if (cmp(b + lo*sz,  b + hi*sz)  > 0) _swap_bytes(b + lo*sz,  b + hi*sz,  sz);
+        if (cmp(b + mid*sz, b + hi*sz)  > 0) _swap_bytes(b + mid*sz, b + hi*sz,  sz);
+        _swap_bytes(b + mid*sz, b + (hi-1)*sz, sz);
         unsigned char *pivot = b + (hi-1)*sz;
         size_t i = lo, j = hi - 1;
         for (;;) {
             while (cmp(b + (++i)*sz, pivot) < 0) {}
             while (j > lo && cmp(b + (--j)*sz, pivot) > 0) {}
             if (i >= j) break;
-            _swap(b + i*sz, b + j*sz, sz);
+            _swap_bytes(b + i*sz, b + j*sz, sz);
         }
-        _swap(b + i*sz, pivot, sz);
+        _swap_bytes(b + i*sz, pivot, sz);
         if (top + 2 < QSORT_STACK) {
-            lo_stk[top] = lo;   hi_stk[top] = i - 1; top++;
-            lo_stk[top] = i+1;  hi_stk[top] = hi;    top++;
+            lo_stk[top] = lo;  hi_stk[top] = i - 1; top++;
+            lo_stk[top] = i+1; hi_stk[top] = hi;    top++;
         }
     }
 }
@@ -613,9 +867,70 @@ void *bsearch(const void *key, const void *base,
     return NULL;
 }
 
-/* ================================================================
- *  Integer math & bit manipulation
- * ================================================================ */
+
+/* ═══════════════════════════════════════════════════════════════════════
+ *  §14  strerror — human-readable error descriptions
+ *
+ *  Returns a string like "No such file or directory" instead of "-2".
+ *  Both positive (POSIX) and negative (Systrix) codes are accepted.
+ *
+ *  CONTRIBUTOR: to add a new error code:
+ *    1. Add the #define to systrix_libc.h §6 with a comment
+ *    2. Add a case here with a clear, plain-English description
+ *    3. Keep the cases sorted by absolute value (makes diffs easier)
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+const char *strerror(int errnum) {
+    if (errnum < 0) errnum = -errnum;  /* normalise negative codes */
+    switch (errnum) {
+    case   1: return "Operation not permitted";
+    case   2: return "No such file or directory";
+    case   3: return "No such process";
+    case   4: return "Interrupted system call";
+    case   5: return "I/O error";
+    case   9: return "Bad file descriptor";
+    case  10: return "No child processes";
+    case  11: return "Resource temporarily unavailable (try again)";
+    case  12: return "Out of memory";
+    case  13: return "Permission denied";
+    case  14: return "Bad address (invalid pointer)";
+    case  16: return "Device or resource busy";
+    case  17: return "File already exists";
+    case  19: return "No such device";
+    case  20: return "Not a directory";
+    case  21: return "Is a directory (expected a file)";
+    case  22: return "Invalid argument";
+    case  23: return "File table overflow (system open file limit reached)";
+    case  24: return "Too many open files (process open file limit reached)";
+    case  28: return "No space left on device";
+    case  30: return "Read-only file system";
+    case  32: return "Broken pipe (reader closed)";
+    case  34: return "Numerical result out of range";
+    case  36: return "File name too long";
+    case  38: return "Function not implemented";
+    case  39: return "Directory not empty";
+    case  75: return "Value too large for data type (overflow)";
+    case  95: return "Operation not supported on this file system or device";
+    case 101: return "Network is unreachable";
+    case 106: return "Transport endpoint is already connected";
+    case 107: return "Transport endpoint is not connected";
+    case 110: return "Connection timed out";
+    case 111: return "Connection refused";
+    case 114: return "Operation already in progress";
+    case 115: return "Operation now in progress (non-blocking)";
+    default:  return "Unknown error (check errno definition in systrix_libc.h)";
+    }
+}
+
+/* Alias used by the CHECK_ERR macros (accepts int) */
+const char *slibc_strerror_simple(int errnum) {
+    return strerror(errnum);
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════
+ *  §15  Integer math & bit manipulation
+ * ═══════════════════════════════════════════════════════════════════════ */
 
 uint64_t slibc_pow_u64(uint64_t base, uint32_t exp) {
     uint64_t result = 1;
@@ -661,33 +976,20 @@ uint64_t slibc_round_down_pow2(uint64_t v) {
 }
 
 int slibc_popcount(uint64_t v) {
-    /* Portable Hamming-weight; no libgcc __popcountdi2 needed. */
+    /* Portable Hamming-weight without libgcc */
     v = v - ((v >> 1) & 0x5555555555555555ULL);
     v = (v & 0x3333333333333333ULL) + ((v >> 2) & 0x3333333333333333ULL);
     v = (v + (v >> 4)) & 0x0f0f0f0f0f0f0f0fULL;
     return (int)((v * 0x0101010101010101ULL) >> 56);
 }
 
-int slibc_clz(uint64_t v) {
-    if (v == 0) return 64;
-    return __builtin_clzll(v);
-}
-
-int slibc_ctz(uint64_t v) {
-    if (v == 0) return 64;
-    return __builtin_ctzll(v);
-}
-
-int slibc_parity(uint64_t v) {
-    return __builtin_parityll(v);
-}
+int slibc_clz(uint64_t v) { return v == 0 ? 64 : __builtin_clzll(v); }
+int slibc_ctz(uint64_t v) { return v == 0 ? 64 : __builtin_ctzll(v); }
+int slibc_parity(uint64_t v) { return __builtin_parityll(v); }
 
 uint64_t slibc_reverse_bits(uint64_t v) {
     uint64_t r = 0;
-    for (int i = 0; i < 64; i++) {
-        r = (r << 1) | (v & 1);
-        v >>= 1;
-    }
+    for (int i = 0; i < 64; i++) { r = (r << 1) | (v & 1); v >>= 1; }
     return r;
 }
 
@@ -698,26 +1000,12 @@ uint8_t slibc_reverse_byte(uint8_t v) {
     return v;
 }
 
-uint64_t slibc_rotl64(uint64_t v, int n) {
-    n &= 63;
-    return (v << n) | (v >> (64 - n));
-}
-uint64_t slibc_rotr64(uint64_t v, int n) {
-    n &= 63;
-    return (v >> n) | (v << (64 - n));
-}
-uint32_t slibc_rotl32(uint32_t v, int n) {
-    n &= 31;
-    return (v << n) | (v >> (32 - n));
-}
-uint32_t slibc_rotr32(uint32_t v, int n) {
-    n &= 31;
-    return (v >> n) | (v << (32 - n));
-}
+uint64_t slibc_rotl64(uint64_t v, int n) { n &= 63; return (v << n) | (v >> (64 - n)); }
+uint64_t slibc_rotr64(uint64_t v, int n) { n &= 63; return (v >> n) | (v << (64 - n)); }
+uint32_t slibc_rotl32(uint32_t v, int n) { n &= 31; return (v << n) | (v >> (32 - n)); }
+uint32_t slibc_rotr32(uint32_t v, int n) { n &= 31; return (v >> n) | (v << (32 - n)); }
 
-uint16_t slibc_bswap16(uint16_t v) {
-    return (uint16_t)((v >> 8) | (v << 8));
-}
+uint16_t slibc_bswap16(uint16_t v) { return (uint16_t)((v >> 8) | (v << 8)); }
 uint32_t slibc_bswap32(uint32_t v) {
     return ((v & 0x000000FFu) << 24) | ((v & 0x0000FF00u) << 8)
          | ((v & 0x00FF0000u) >> 8)  | ((v & 0xFF000000u) >> 24);
@@ -728,8 +1016,7 @@ uint64_t slibc_bswap64(uint64_t v) {
 }
 
 int slibc_add_overflow_u64(uint64_t a, uint64_t b, uint64_t *out) {
-    *out = a + b;
-    return *out < a;
+    *out = a + b; return *out < a;
 }
 int slibc_mul_overflow_u64(uint64_t a, uint64_t b, uint64_t *out) {
     if (a != 0 && b > UINT64_MAX / a) return 1;
@@ -744,7 +1031,7 @@ int slibc_add_overflow_i64(int64_t a, int64_t b, int64_t *out) {
 int slibc_mul_overflow_i64(int64_t a, int64_t b, int64_t *out) {
     if (a == 0 || b == 0) { *out = 0; return 0; }
     if (a > 0 && b > 0 && a > INT64_MAX / b) return 1;
-    if (a < 0 && b < 0 && a < INT64_MAX / b) return 1; /* neg*neg */
+    if (a < 0 && b < 0 && a < INT64_MAX / b) return 1;
     if (a > 0 && b < 0 && b < INT64_MIN / a) return 1;
     if (a < 0 && b > 0 && a < INT64_MIN / b) return 1;
     *out = a * b; return 0;
@@ -756,52 +1043,46 @@ uint64_t slibc_gcd(uint64_t a, uint64_t b) {
 }
 uint64_t slibc_lcm(uint64_t a, uint64_t b) {
     if (a == 0 || b == 0) return 0;
-    uint64_t g = slibc_gcd(a, b);
     uint64_t out;
-    if (slibc_mul_overflow_u64(a / g, b, &out)) return 0;
+    if (slibc_mul_overflow_u64(a / slibc_gcd(a, b), b, &out)) return 0;
     return out;
 }
 
 uint64_t slibc_sat_add_u64(uint64_t a, uint64_t b) {
-    uint64_t r = a + b;
-    return (r < a) ? UINT64_MAX : r;
+    uint64_t r = a + b; return (r < a) ? UINT64_MAX : r;
 }
-uint64_t slibc_sat_sub_u64(uint64_t a, uint64_t b) {
-    return (a < b) ? 0 : a - b;
-}
-int64_t slibc_sat_add_i64(int64_t a, int64_t b) {
+uint64_t slibc_sat_sub_u64(uint64_t a, uint64_t b) { return (a < b) ? 0 : a - b; }
+int64_t  slibc_sat_add_i64(int64_t a, int64_t b) {
     int64_t r;
-    if (slibc_add_overflow_i64(a, b, &r))
-        return (b > 0) ? INT64_MAX : INT64_MIN;
+    if (slibc_add_overflow_i64(a, b, &r)) return (b > 0) ? INT64_MAX : INT64_MIN;
     return r;
 }
-int64_t slibc_sat_sub_i64(int64_t a, int64_t b) {
+int64_t  slibc_sat_sub_i64(int64_t a, int64_t b) {
     int64_t r;
-    if (slibc_add_overflow_i64(a, -b, &r))
-        return (b < 0) ? INT64_MAX : INT64_MIN;
+    if (slibc_add_overflow_i64(a, -b, &r)) return (b < 0) ? INT64_MAX : INT64_MIN;
     return r;
 }
 
-int64_t slibc_div_round_up(int64_t n, int64_t d) {
-    return (n + d - 1) / d;
-}
-uint64_t slibc_udiv_round_up(uint64_t n, uint64_t d) {
-    return (n + d - 1) / d;
-}
+int64_t  slibc_div_round_up (int64_t  n, int64_t  d) { return (n + d - 1) / d; }
+uint64_t slibc_udiv_round_up(uint64_t n, uint64_t d) { return (n + d - 1) / d; }
 
-/* ================================================================
- *  String extras
- * ================================================================ */
 
-/* NOTE: slibc_strdup / slibc_strndup require malloc().
- * In user space user/libc.c provides malloc.
- * In kernel space heap_malloc() is the allocator; alias it so the
- * linker never needs a freestanding "malloc" symbol. */
+/* ═══════════════════════════════════════════════════════════════════════
+ *  §16  String extras
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+/* malloc forward-declarations — kernel supplies heap_malloc, user links libc */
 #ifdef SYSTRIX_KERNEL
 extern void *heap_malloc(size_t n);
-static inline void *malloc(size_t n) { return heap_malloc(n); }
+extern void  heap_free  (void *p);
+extern void *heap_realloc(void *p, size_t n);
+static inline void *malloc (size_t n)           { return heap_malloc(n); }
+static inline void  free   (void *p)            { heap_free(p); }
+static inline void *realloc(void *p, size_t n)  { return heap_realloc(p, n); }
 #else
-extern void *malloc(size_t n);  /* resolved at link time (user libc) */
+extern void *malloc (size_t n);
+extern void  free   (void *p);
+extern void *realloc(void *p, size_t n);
 #endif
 
 char *slibc_strdup(const char *s) {
@@ -820,12 +1101,8 @@ char *slibc_strndup(const char *s, size_t n) {
     return d;
 }
 
-void slibc_strupr(char *s) {
-    for (; *s; s++) *s = (char)toupper((unsigned char)*s);
-}
-void slibc_strlwr(char *s) {
-    for (; *s; s++) *s = (char)tolower((unsigned char)*s);
-}
+void slibc_strupr(char *s) { for (; *s; s++) *s = (char)toupper((unsigned char)*s); }
+void slibc_strlwr(char *s) { for (; *s; s++) *s = (char)tolower((unsigned char)*s); }
 void slibc_strrev(char *s) {
     size_t n = strlen(s);
     for (size_t i = 0; i < n / 2; i++) {
@@ -843,15 +1120,13 @@ void slibc_rtrim(char *s) {
     while (e >= s && isspace((unsigned char)*e)) *e-- = '\0';
 }
 void slibc_strtrim(char *s) {
-    /* move ltrim result over the original start */
     char *l = slibc_ltrim(s);
     if (l != s) memmove(s, l, strlen(l) + 1);
     slibc_rtrim(s);
 }
 
 int slibc_str_starts_with(const char *s, const char *prefix) {
-    while (*prefix)
-        if (*s++ != *prefix++) return 0;
+    while (*prefix) if (*s++ != *prefix++) return 0;
     return 1;
 }
 int slibc_str_ends_with(const char *s, const char *suffix) {
@@ -859,17 +1134,15 @@ int slibc_str_ends_with(const char *s, const char *suffix) {
     if (xl > sl) return 0;
     return memcmp(s + sl - xl, suffix, xl) == 0;
 }
-int slibc_str_is_empty(const char *s) {
-    return !s || !*s;
-}
-int slibc_str_is_int(const char *s) {
+int slibc_str_is_empty(const char *s)  { return !s || !*s; }
+int slibc_str_is_int  (const char *s)  {
     if (!s || !*s) return 0;
     if (*s == '-' || *s == '+') s++;
     if (!*s) return 0;
     while (*s) { if (!isdigit((unsigned char)*s++)) return 0; }
     return 1;
 }
-int slibc_str_is_uint(const char *s) {
+int slibc_str_is_uint (const char *s) {
     if (!s || !*s) return 0;
     while (*s) { if (!isdigit((unsigned char)*s++)) return 0; }
     return 1;
@@ -889,8 +1162,7 @@ int slibc_str_replace(const char *src, const char *from,
     size_t pos = 0;
     while (*src && pos + 1 < bufsz) {
         if (fl && strncmp(src, from, fl) == 0) {
-            for (size_t i = 0; i < tl && pos + 1 < bufsz; i++)
-                buf[pos++] = to[i];
+            for (size_t i = 0; i < tl && pos + 1 < bufsz; i++) buf[pos++] = to[i];
             src += fl;
         } else {
             buf[pos++] = *src++;
@@ -919,8 +1191,7 @@ int slibc_str_join(const char **parts, int count,
     size_t pos = 0;
     for (int i = 0; i < count; i++) {
         if (i > 0 && pos + 1 < bufsz) buf[pos++] = sep;
-        for (const char *p = parts[i]; *p && pos + 1 < bufsz; )
-            buf[pos++] = *p++;
+        for (const char *p = parts[i]; *p && pos + 1 < bufsz; ) buf[pos++] = *p++;
     }
     buf[pos < bufsz ? pos : bufsz - 1] = '\0';
     return (int)pos;
@@ -954,23 +1225,22 @@ int slibc_hex_decode(const char *hex, uint8_t *out, size_t outlen) {
     return (int)written;
 }
 
-/* ================================================================
- *  Hashing
- * ================================================================ */
+
+/* ═══════════════════════════════════════════════════════════════════════
+ *  §17  Hashing
+ * ═══════════════════════════════════════════════════════════════════════ */
 
 uint32_t slibc_fnv1a32(const void *data, size_t len) {
     const uint8_t *p = (const uint8_t *)data;
     uint32_t h = 2166136261u;
-    for (size_t i = 0; i < len; i++)
-        h = (h ^ p[i]) * 16777619u;
+    for (size_t i = 0; i < len; i++) h = (h ^ p[i]) * 16777619u;
     return h;
 }
 
 uint64_t slibc_fnv1a64(const void *data, size_t len) {
     const uint8_t *p = (const uint8_t *)data;
     uint64_t h = 14695981039346656037ULL;
-    for (size_t i = 0; i < len; i++)
-        h = (h ^ p[i]) * 1099511628211ULL;
+    for (size_t i = 0; i < len; i++) h = (h ^ p[i]) * 1099511628211ULL;
     return h;
 }
 
@@ -986,8 +1256,7 @@ uint32_t slibc_murmur3_32(const void *data, size_t len, uint32_t seed) {
     size_t nblocks = len / 4;
     const uint32_t c1 = 0xcc9e2d51u, c2 = 0x1b873593u;
     for (size_t i = 0; i < nblocks; i++) {
-        uint32_t k;
-        memcpy(&k, p + i*4, 4);
+        uint32_t k; memcpy(&k, p + i*4, 4);
         k *= c1; k = slibc_rotl32(k, 15); k *= c2;
         h ^= k;  h = slibc_rotl32(h, 13);
         h = h * 5 + 0xe6546b64u;
@@ -1007,7 +1276,6 @@ uint32_t slibc_murmur3_32(const void *data, size_t len, uint32_t seed) {
     return h;
 }
 
-/* CRC-32 table-driven (ISO 3309 / Ethernet polynomial) */
 static uint32_t _crc32_tab[256];
 static int      _crc32_ready = 0;
 
@@ -1026,35 +1294,26 @@ uint32_t slibc_crc32_update(uint32_t crc, const void *data, size_t len) {
     _crc32_init();
     const uint8_t *p = (const uint8_t *)data;
     crc ^= 0xFFFFFFFFu;
-    for (size_t i = 0; i < len; i++)
-        crc = (crc >> 8) ^ _crc32_tab[(crc ^ p[i]) & 0xFF];
+    for (size_t i = 0; i < len; i++) crc = (crc >> 8) ^ _crc32_tab[(crc ^ p[i]) & 0xFF];
     return crc ^ 0xFFFFFFFFu;
 }
-
-uint32_t slibc_crc32(const void *data, size_t len) {
-    return slibc_crc32_update(0, data, len);
-}
+uint32_t slibc_crc32(const void *data, size_t len) { return slibc_crc32_update(0, data, len); }
 
 uint32_t slibc_adler32_update(uint32_t adler, const void *data, size_t len) {
     const uint8_t *p = (const uint8_t *)data;
     uint32_t s1 = adler & 0xFFFF, s2 = (adler >> 16) & 0xFFFF;
-    for (size_t i = 0; i < len; i++) {
-        s1 = (s1 + p[i]) % 65521u;
-        s2 = (s2 + s1)   % 65521u;
-    }
+    for (size_t i = 0; i < len; i++) { s1 = (s1 + p[i]) % 65521u; s2 = (s2 + s1) % 65521u; }
     return (s2 << 16) | s1;
 }
+uint32_t slibc_adler32(const void *data, size_t len) { return slibc_adler32_update(1, data, len); }
 
-uint32_t slibc_adler32(const void *data, size_t len) {
-    return slibc_adler32_update(1, data, len);
-}
 
-/* ================================================================
- *  PRNG — splitmix64 + xorshift64
- * ================================================================ */
+/* ═══════════════════════════════════════════════════════════════════════
+ *  §18  PRNG — splitmix64 + xorshift64
+ * ═══════════════════════════════════════════════════════════════════════ */
 
 void slibc_rng_seed(SRng *r, uint64_t seed) {
-    /* splitmix64 step to spread low-entropy seeds */
+    /* splitmix64 to spread low-entropy seeds into full state space */
     seed += 0x9e3779b97f4a7c15ULL;
     seed = (seed ^ (seed >> 30)) * 0xbf58476d1ce4e5b9ULL;
     seed = (seed ^ (seed >> 27)) * 0x94d049bb133111ebULL;
@@ -1065,18 +1324,14 @@ void slibc_rng_seed(SRng *r, uint64_t seed) {
 uint64_t slibc_rng_next(SRng *r) {
     uint64_t x = r->state;
     x ^= x << 13; x ^= x >> 7; x ^= x << 17;
-    r->state = x;
-    return x;
+    return (r->state = x);
 }
 
-uint32_t slibc_rng_u32(SRng *r) {
-    return (uint32_t)(slibc_rng_next(r) >> 32);
-}
+uint32_t slibc_rng_u32   (SRng *r) { return (uint32_t)(slibc_rng_next(r) >> 32); }
 
 uint64_t slibc_rng_range(SRng *r, uint64_t lo, uint64_t hi) {
     if (lo >= hi) return lo;
     uint64_t range = hi - lo;
-    /* rejection sampling for unbiased result */
     uint64_t threshold = (uint64_t)(-(int64_t)range) % range;
     uint64_t x;
     do { x = slibc_rng_next(r); } while (x < threshold);
@@ -1085,64 +1340,48 @@ uint64_t slibc_rng_range(SRng *r, uint64_t lo, uint64_t hi) {
 
 void slibc_rng_fill(SRng *r, void *buf, size_t n) {
     uint8_t *p = (uint8_t *)buf;
-    while (n >= 8) {
-        uint64_t v = slibc_rng_next(r);
-        memcpy(p, &v, 8); p += 8; n -= 8;
-    }
-    if (n) {
-        uint64_t v = slibc_rng_next(r);
-        memcpy(p, &v, n);
-    }
+    while (n >= 8) { uint64_t v = slibc_rng_next(r); memcpy(p, &v, 8); p += 8; n -= 8; }
+    if (n) { uint64_t v = slibc_rng_next(r); memcpy(p, &v, n); }
 }
 
 void slibc_rng_shuffle(SRng *r, void *base, size_t nmemb, size_t sz) {
     if (nmemb < 2 || sz == 0) return;
     uint8_t *b = (uint8_t *)base;
-    /* temporary swap buffer on the stack — safe for sz <= 256 */
     uint8_t tmp[256];
     for (size_t i = nmemb - 1; i > 0; i--) {
         size_t j = (size_t)slibc_rng_range(r, 0, i + 1);
         if (i != j) {
             if (sz <= 256) {
-                memcpy(tmp,      b + i*sz, sz);
-                memcpy(b + i*sz, b + j*sz, sz);
-                memcpy(b + j*sz, tmp,      sz);
+                memcpy(tmp, b + i*sz, sz); memcpy(b + i*sz, b + j*sz, sz); memcpy(b + j*sz, tmp, sz);
             } else {
-                /* byte-by-byte swap for large elements */
                 uint8_t *a_ = b + i*sz, *b_ = b + j*sz;
-                for (size_t k = 0; k < sz; k++) {
-                    uint8_t t = a_[k]; a_[k] = b_[k]; b_[k] = t;
-                }
+                for (size_t k = 0; k < sz; k++) { uint8_t t = a_[k]; a_[k] = b_[k]; b_[k] = t; }
             }
         }
     }
 }
 
 static SRng _global_rng = { 12345678901234567ULL };
+void     slibc_srand     (uint64_t seed)              { slibc_rng_seed(&_global_rng, seed); }
+uint64_t slibc_rand      (void)                       { return slibc_rng_next(&_global_rng); }
+uint64_t slibc_rand_range(uint64_t lo, uint64_t hi)   { return slibc_rng_range(&_global_rng, lo, hi); }
 
-void slibc_srand(uint64_t seed) { slibc_rng_seed(&_global_rng, seed); }
-uint64_t slibc_rand(void)       { return slibc_rng_next(&_global_rng); }
-uint64_t slibc_rand_range(uint64_t lo, uint64_t hi) {
-    return slibc_rng_range(&_global_rng, lo, hi);
-}
 
-/* ================================================================
- *  Ring buffer
- * ================================================================ */
+/* ═══════════════════════════════════════════════════════════════════════
+ *  §19  Ring buffer
+ * ═══════════════════════════════════════════════════════════════════════ */
 
 void slibc_ring_init(SRing *r, void *buf, uint32_t cap, uint32_t elem_size) {
-    r->buf   = (uint8_t *)buf;
-    r->cap   = cap;
-    r->esize = elem_size;
-    r->head  = 0;
-    r->tail  = 0;
+    SLIBC_ASSERT(IS_POWER_OF_2(cap), "ring buffer capacity must be a power of 2");
+    r->buf = (uint8_t *)buf; r->cap = cap; r->esize = elem_size;
+    r->head = r->tail = 0;
 }
 
 int slibc_ring_push(SRing *r, const void *elem) {
     if (slibc_ring_full(r)) return -1;
     uint32_t idx = r->head & (r->cap - 1);
     memcpy(r->buf + (size_t)idx * r->esize, elem, r->esize);
-    slibc_barrier();
+    compiler_barrier();
     r->head++;
     return 0;
 }
@@ -1151,7 +1390,7 @@ int slibc_ring_pop(SRing *r, void *elem) {
     if (slibc_ring_empty(r)) return -1;
     uint32_t idx = r->tail & (r->cap - 1);
     memcpy(elem, r->buf + (size_t)idx * r->esize, r->esize);
-    slibc_barrier();
+    compiler_barrier();
     r->tail++;
     return 0;
 }
@@ -1165,28 +1404,24 @@ int slibc_ring_peek(const SRing *r, void *elem) {
 
 void slibc_ring_clear(SRing *r) { r->head = r->tail = 0; }
 
-/* ================================================================
- *  Bitmap
- * ================================================================ */
+
+/* ═══════════════════════════════════════════════════════════════════════
+ *  §20  Bitmap
+ * ═══════════════════════════════════════════════════════════════════════ */
 
 void slibc_bm_init(SBitmap *bm, uint64_t *words, size_t nbits) {
     bm->words = words; bm->nbits = nbits;
     memset(words, 0, ((nbits + 63) / 64) * 8);
 }
-void slibc_bm_set   (SBitmap *bm, size_t bit) { bm->words[bit/64] |=  ((uint64_t)1 << (bit%64)); }
-void slibc_bm_clear (SBitmap *bm, size_t bit) { bm->words[bit/64] &= ~((uint64_t)1 << (bit%64)); }
-int  slibc_bm_test  (const SBitmap *bm, size_t bit) { return !!(bm->words[bit/64] & ((uint64_t)1 << (bit%64))); }
-void slibc_bm_toggle(SBitmap *bm, size_t bit) { bm->words[bit/64] ^=  ((uint64_t)1 << (bit%64)); }
-
-void slibc_bm_zero(SBitmap *bm) {
-    memset(bm->words, 0, ((bm->nbits + 63) / 64) * 8);
-}
-void slibc_bm_fill(SBitmap *bm) {
+void   slibc_bm_set   (SBitmap *bm, size_t bit) { bm->words[bit/64] |=  ((uint64_t)1 << (bit%64)); }
+void   slibc_bm_clear (SBitmap *bm, size_t bit) { bm->words[bit/64] &= ~((uint64_t)1 << (bit%64)); }
+int    slibc_bm_test  (const SBitmap *bm, size_t bit) { return !!(bm->words[bit/64] & ((uint64_t)1 << (bit%64))); }
+void   slibc_bm_toggle(SBitmap *bm, size_t bit) { bm->words[bit/64] ^=  ((uint64_t)1 << (bit%64)); }
+void   slibc_bm_zero  (SBitmap *bm) { memset(bm->words, 0,    ((bm->nbits + 63) / 64) * 8); }
+void   slibc_bm_fill  (SBitmap *bm) {
     size_t nw = (bm->nbits + 63) / 64;
     memset(bm->words, 0xFF, nw * 8);
-    /* clear bits past the end */
-    if (bm->nbits % 64)
-        bm->words[nw-1] = ((uint64_t)1 << (bm->nbits % 64)) - 1;
+    if (bm->nbits % 64) bm->words[nw-1] = ((uint64_t)1 << (bm->nbits % 64)) - 1;
 }
 
 size_t slibc_bm_first_set(const SBitmap *bm, size_t start) {
@@ -1202,8 +1437,8 @@ size_t slibc_bm_first_clear(const SBitmap *bm, size_t start) {
     for (size_t b = start; b < bm->nbits; ) {
         uint64_t w = ~bm->words[b/64] >> (b%64);
         if (w) {
-            size_t r = b + (size_t)slibc_ctz(w);
-            return (r < bm->nbits) ? r : bm->nbits;
+            size_t found = b + (size_t)slibc_ctz(w);
+            return found < bm->nbits ? found : bm->nbits;
         }
         b = (b/64 + 1) * 64;
     }
@@ -1216,57 +1451,48 @@ size_t slibc_bm_count_set(const SBitmap *bm) {
     return n;
 }
 
-/* ================================================================
- *  Fixed-width formatting helpers
- * ================================================================ */
+
+/* ═══════════════════════════════════════════════════════════════════════
+ *  §21  Formatting helpers
+ * ═══════════════════════════════════════════════════════════════════════ */
 
 void slibc_fmt_bytes(uint64_t bytes, char *buf, size_t bufsz) {
-    const char *units[] = {"B","KB","MB","GB","TB","PB"};
-    int u = 0;
-    uint64_t whole = bytes, frac = 0;
-    while (whole >= 1024 && u < 5) {
-        frac  = (whole % 1024) * 100 / 1024;
-        whole = whole / 1024;
-        u++;
-    }
-    if (u == 0)
+    if (bytes < 1024) {
         snprintf(buf, bufsz, "%llu B", (unsigned long long)bytes);
-    else
-        snprintf(buf, bufsz, "%llu.%02llu %s",
-                 (unsigned long long)whole,
-                 (unsigned long long)frac,
-                 units[u]);
+    } else if (bytes < 1024ULL * 1024) {
+        snprintf(buf, bufsz, "%llu.%02llu KB",
+                 (unsigned long long)(bytes / 1024),
+                 (unsigned long long)((bytes % 1024) * 100 / 1024));
+    } else if (bytes < 1024ULL * 1024 * 1024) {
+        uint64_t mb = bytes / (1024 * 1024);
+        uint64_t frac = (bytes % (1024ULL * 1024)) * 100 / (1024ULL * 1024);
+        snprintf(buf, bufsz, "%llu.%02llu MB", (unsigned long long)mb, (unsigned long long)frac);
+    } else {
+        uint64_t gb = bytes / (1024ULL * 1024 * 1024);
+        uint64_t frac = (bytes % (1024ULL * 1024 * 1024)) * 100 / (1024ULL * 1024 * 1024);
+        snprintf(buf, bufsz, "%llu.%02llu GB", (unsigned long long)gb, (unsigned long long)frac);
+    }
 }
 
 void slibc_fmt_duration_ms(uint64_t ms, char *buf, size_t bufsz) {
     if (ms < 1000) {
         snprintf(buf, bufsz, "%llums", (unsigned long long)ms);
+    } else if (ms < 60000) {
+        snprintf(buf, bufsz, "%llu.%03llus",
+                 (unsigned long long)(ms / 1000), (unsigned long long)(ms % 1000));
+    } else if (ms < 3600000) {
+        snprintf(buf, bufsz, "%llum %02llus",
+                 (unsigned long long)(ms / 60000), (unsigned long long)((ms % 60000) / 1000));
     } else {
-        uint64_t s = ms / 1000;
-        uint64_t m = s / 60; s %= 60;
-        uint64_t h = m / 60; m %= 60;
-        uint64_t d = h / 24; h %= 24;
-        if (d)
-            snprintf(buf, bufsz, "%llud %02lluh %02llum %02llus",
-                     (unsigned long long)d, (unsigned long long)h,
-                     (unsigned long long)m, (unsigned long long)s);
-        else if (h)
-            snprintf(buf, bufsz, "%lluh %02llum %02llus",
-                     (unsigned long long)h, (unsigned long long)m,
-                     (unsigned long long)s);
-        else
-            snprintf(buf, bufsz, "%llum %02llus",
-                     (unsigned long long)m, (unsigned long long)s);
+        snprintf(buf, bufsz, "%lluh %02llum %02llus",
+                 (unsigned long long)(ms / 3600000),
+                 (unsigned long long)((ms % 3600000) / 60000),
+                 (unsigned long long)((ms % 60000) / 1000));
     }
 }
 
 void slibc_fmt_zpad(uint64_t v, int width, char *buf) {
-    char tmp[22]; int n = slibc_u64_to_dec(v, tmp);
-    int pad = width - n; if (pad < 0) pad = 0;
-    int i = 0;
-    while (pad-- > 0) buf[i++] = '0';
-    for (int j = 0; j < n; j++) buf[i++] = tmp[j];
-    buf[i] = '\0';
+    snprintf(buf, (size_t)(width + 1), "%0*llu", width, (unsigned long long)v);
 }
 
 void slibc_fmt_ipv4(uint32_t ip_be, char *buf) {
@@ -1280,492 +1506,35 @@ void slibc_fmt_mac(const uint8_t mac[6], char *buf) {
 }
 
 int slibc_parse_ipv4(const char *s, uint32_t *out_be) {
-    uint8_t *b = (uint8_t *)out_be;
-    for (int i = 0; i < 4; i++) {
-        char *end;
-        long v = strtol(s, &end, 10);
-        if (end == s || v < 0 || v > 255) return -1;
-        b[i] = (uint8_t)v;
-        if (i < 3) { if (*end != '.') return -1; s = end + 1; }
-        else s = end;
-    }
+    unsigned int a, b, c, d;
+    int n = 0;
+    /* parse N.N.N.N manually */
+    while (*s && isdigit((unsigned char)*s)) a = a * 10 + (*s++ - '0'), n++;
+    if (*s++ != '.' || n == 0) return -1; n = 0;
+    while (*s && isdigit((unsigned char)*s)) b = b * 10 + (*s++ - '0'), n++;
+    if (*s++ != '.' || n == 0) return -1; n = 0;
+    while (*s && isdigit((unsigned char)*s)) c = c * 10 + (*s++ - '0'), n++;
+    if (*s++ != '.' || n == 0) return -1; n = 0;
+    while (*s && isdigit((unsigned char)*s)) d = d * 10 + (*s++ - '0'), n++;
+    if (n == 0 || a > 255 || b > 255 || c > 255 || d > 255) return -1;
+    uint8_t *o = (uint8_t *)out_be;
+    o[0] = (uint8_t)a; o[1] = (uint8_t)b; o[2] = (uint8_t)c; o[3] = (uint8_t)d;
     return 0;
 }
 
-/* ================================================================
- *  Checksum / parity
- * ================================================================ */
-
-uint16_t slibc_inet_checksum_update(uint16_t acc,
-                                     const void *data, size_t len) {
-    const uint8_t *p = (const uint8_t *)data;
-    uint32_t sum = (~acc) & 0xFFFF;  /* un-fold accumulator */
-    while (len > 1) {
-        sum += ((uint32_t)p[0] << 8) | p[1];
-        p += 2; len -= 2;
-    }
-    if (len) sum += (uint32_t)p[0] << 8;
-    while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
-    return (uint16_t)(~sum);
+void slibc_fmt_progress(char *buf, size_t total_width,
+                        uint64_t numerator, uint64_t denominator) {
+    if (!buf || total_width == 0) return;
+    if (denominator == 0) denominator = 1;
+    if (numerator > denominator) numerator = denominator;
+    size_t filled = (size_t)((numerator * total_width) / denominator);
+    if (filled > total_width) filled = total_width;
+    buf[0] = '[';
+    for (size_t i = 0; i < total_width; i++)
+        buf[1 + i] = (i < filled) ? ((i + 1 == filled && filled < total_width) ? '>' : '=') : ' ';
+    buf[1 + total_width] = ']';
+    buf[2 + total_width] = '\0';
 }
-
-uint16_t slibc_inet_checksum(const void *data, size_t len) {
-    return slibc_inet_checksum_update(0xFFFF, data, len);
-}
-
-uint8_t slibc_xor_checksum(const void *data, size_t len) {
-    const uint8_t *p = (const uint8_t *)data;
-    uint8_t xr = 0;
-    for (size_t i = 0; i < len; i++) xr ^= p[i];
-    return xr;
-}
-
-/* ================================================================
- *  Sorting extras
- * ================================================================ */
-
-void slibc_isort(void *base, size_t nmemb, size_t sz,
-                 int (*cmp)(const void *, const void *)) {
-    _isort((unsigned char *)base, nmemb, sz, cmp);  /* reuse from qsort section */
-}
-
-/* Bottom-up merge sort — stable, O(n log n), no heap required.
- * Uses a fixed 512-byte stack buffer; larger elements fall back to
- * rotation-based merge (in-place, still O(n log n) but slower). */
-#define _MSORT_BUF 512
-static void _merge(unsigned char *a, size_t la,
-                   unsigned char *b, size_t lb, size_t sz,
-                   int (*cmp)(const void *, const void *)) {
-    /* If element fits in scratch, use buffered merge */
-    if (la * sz <= _MSORT_BUF) {
-        unsigned char tmp[_MSORT_BUF];
-        memcpy(tmp, a, la * sz);
-        unsigned char *t = tmp, *te = tmp + la * sz;
-        unsigned char *bd = b, *be = b + lb * sz;
-        unsigned char *dst = a;
-        while (t < te && bd < be) {
-            if (cmp(t, bd) <= 0) { memcpy(dst, t, sz); t += sz; }
-            else                  { memcpy(dst, bd, sz); bd += sz; }
-            dst += sz;
-        }
-        while (t  < te) { memcpy(dst, t,  sz); t  += sz; dst += sz; }
-        /* bd..be is already in place */
-        return;
-    }
-    /* Fallback: naive O(n*m) merge for large items (rare in kernel) */
-    while (la && lb) {
-        if (cmp(a, b) > 0) {
-            /* rotate b[0] into position */
-            unsigned char *p = b, *q = b + sz;
-            unsigned char *end = b + lb * sz;
-            /* shift b[0] backwards through a */
-            unsigned char *ins = a;
-            while (ins < b) {
-                /* swap ins and ins+sz*(distance) — just rotate one step */
-                for (size_t k = 0; k < sz; k++) {
-                    unsigned char t = ins[k]; ins[k] = b[k]; b[k] = t;
-                }
-                ins += sz;
-            }
-            (void)p; (void)q; (void)end;
-            a += sz; la--;
-        } else { a += sz; la--; }
-    }
-}
-
-void slibc_msort(void *base, size_t nmemb, size_t sz,
-                 int (*cmp)(const void *, const void *)) {
-    if (nmemb < 2 || sz == 0) return;
-    unsigned char *b = (unsigned char *)base;
-    /* bottom-up: merge runs of width 1, 2, 4, 8, ... */
-    for (size_t width = 1; width < nmemb; width *= 2) {
-        for (size_t lo = 0; lo < nmemb; lo += 2 * width) {
-            size_t mid = lo + width;
-            if (mid >= nmemb) break;
-            size_t hi = lo + 2 * width;
-            if (hi > nmemb) hi = nmemb;
-            _merge(b + lo*sz, mid - lo, b + mid*sz, hi - mid, sz, cmp);
-        }
-    }
-}
-
-/* ================================================================
- *  Integer-to-string (itoa family)
- * ================================================================ */
-
-char *slibc_itoa(int64_t v, char *buf) {
-    if (v == 0) { buf[0] = '0'; buf[1] = '\0'; return buf; }
-    int neg = (v < 0); if (neg) v = -v;
-    char tmp[22]; int n = slibc_u64_to_dec((uint64_t)v, tmp);
-    int i = 0;
-    if (neg) buf[i++] = '-';
-    for (int j = 0; j < n; j++) buf[i++] = tmp[j];
-    buf[i] = '\0';
-    return buf;
-}
-char *slibc_utoa(uint64_t v, char *buf) { slibc_u64_to_dec(v, buf); return buf; }
-char *slibc_xtoa(uint64_t v, char *buf) { slibc_u64_to_hex(v, buf); return buf; }
-char *slibc_Xtoa(uint64_t v, char *buf) { slibc_u64_to_HEX(v, buf); return buf; }
-char *slibc_otoa(uint64_t v, char *buf) {
-    if (v == 0) { buf[0] = '0'; buf[1] = '\0'; return buf; }
-    char tmp[24]; int n = 0;
-    while (v) { tmp[n++] = '0' + (char)(v & 7); v >>= 3; }
-    for (int i = 0; i < n; i++) buf[i] = tmp[n-1-i];
-    buf[n] = '\0'; return buf;
-}
-char *slibc_btoa(uint64_t v, char *buf) {
-    if (v == 0) { buf[0] = '0'; buf[1] = '\0'; return buf; }
-    int n = 0; char tmp[64];
-    while (v) { tmp[n++] = '0' + (char)(v & 1); v >>= 1; }
-    for (int i = 0; i < n; i++) buf[i] = tmp[n-1-i];
-    buf[n] = '\0'; return buf;
-}
-
-/* ================================================================
- *  Memory pool allocator
- * ================================================================ */
-
-void slibc_pool_init(SPool *p, void *mem, size_t obj_size, size_t capacity) {
-    /* pad obj_size to at least sizeof(size_t) for freelist pointer */
-    if (obj_size < sizeof(size_t)) obj_size = sizeof(size_t);
-    p->mem      = (uint8_t *)mem;
-    p->obj_size = obj_size;
-    p->capacity = capacity;
-    p->free_head = 0;
-    /* build the freelist: each slot stores index of next free slot */
-    for (size_t i = 0; i < capacity - 1; i++)
-        *(size_t *)(p->mem + i * obj_size) = i + 1;
-    *(size_t *)(p->mem + (capacity - 1) * obj_size) = SIZE_MAX;
-}
-
-void *slibc_pool_alloc(SPool *p) {
-    if (p->free_head == SIZE_MAX) return NULL;
-    uint8_t *obj = p->mem + p->free_head * p->obj_size;
-    p->free_head = *(size_t *)obj;
-    memset(obj, 0, p->obj_size);
-    return obj;
-}
-
-void slibc_pool_free(SPool *p, void *obj) {
-    if (!obj) return;
-    size_t idx = ((uint8_t *)obj - p->mem) / p->obj_size;
-    *(size_t *)obj = p->free_head;
-    p->free_head   = idx;
-}
-
-void slibc_pool_reset(SPool *p) {
-    slibc_pool_init(p, p->mem, p->obj_size, p->capacity);
-}
-
-/* ================================================================
- *  Simple key=value config parser
- * ================================================================ */
-
-int slibc_cfg_parse(SCfg *cfg, const char *text) {
-    cfg->count = 0;
-    while (*text && cfg->count < SLIBC_CFG_MAX_PAIRS) {
-        /* skip whitespace + blank lines */
-        while (*text == ' ' || *text == '\t' ||
-               *text == '\r' || *text == '\n') text++;
-        if (!*text) break;
-        /* skip comment lines */
-        if (*text == '#' || *text == ';') {
-            while (*text && *text != '\n') text++;
-            continue;
-        }
-        /* parse key */
-        SCfgPair *pair = &cfg->pairs[cfg->count];
-        int ki = 0;
-        while (*text && *text != '=' && *text != '\n' &&
-               ki < SLIBC_CFG_MAX_KEY - 1)
-            pair->key[ki++] = *text++;
-        pair->key[ki] = '\0';
-        /* rtrim key */
-        while (ki > 0 && (pair->key[ki-1] == ' ' || pair->key[ki-1] == '\t'))
-            pair->key[--ki] = '\0';
-        if (*text != '=') {
-            while (*text && *text != '\n') text++;
-            continue;
-        }
-        text++; /* skip '=' */
-        /* skip leading spaces in value */
-        while (*text == ' ' || *text == '\t') text++;
-        /* parse value */
-        int vi = 0;
-        while (*text && *text != '\n' && vi < SLIBC_CFG_MAX_VAL - 1)
-            pair->val[vi++] = *text++;
-        pair->val[vi] = '\0';
-        /* rtrim value */
-        while (vi > 0 && (pair->val[vi-1] == ' '  || pair->val[vi-1] == '\t' ||
-                          pair->val[vi-1] == '\r'))
-            pair->val[--vi] = '\0';
-        if (ki > 0) cfg->count++;
-    }
-    return cfg->count;
-}
-
-const char *slibc_cfg_get(const SCfg *cfg, const char *key) {
-    for (int i = 0; i < cfg->count; i++)
-        if (strcmp(cfg->pairs[i].key, key) == 0)
-            return cfg->pairs[i].val;
-    return NULL;
-}
-const char *slibc_cfg_get_or(const SCfg *cfg, const char *key,
-                              const char *fallback) {
-    const char *v = slibc_cfg_get(cfg, key);
-    return v ? v : fallback;
-}
-int slibc_cfg_get_int(const SCfg *cfg, const char *key, int fallback) {
-    const char *v = slibc_cfg_get(cfg, key);
-    return v ? atoi(v) : fallback;
-}
-
-/* ================================================================
- *  Base64
- * ================================================================ */
-
-static const char _b64enc[] =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-size_t slibc_base64_encode(const uint8_t *src, size_t len, char *out) {
-    size_t oi = 0;
-    for (size_t i = 0; i < len; i += 3) {
-        uint32_t v = (uint32_t)src[i] << 16;
-        if (i+1 < len) v |= (uint32_t)src[i+1] << 8;
-        if (i+2 < len) v |= (uint32_t)src[i+2];
-        out[oi++] = _b64enc[(v >> 18) & 0x3F];
-        out[oi++] = _b64enc[(v >> 12) & 0x3F];
-        out[oi++] = (i+1 < len) ? _b64enc[(v >> 6) & 0x3F] : '=';
-        out[oi++] = (i+2 < len) ? _b64enc[(v)      & 0x3F] : '=';
-    }
-    out[oi] = '\0';
-    return oi;
-}
-
-static int _b64val(char c) {
-    if (c >= 'A' && c <= 'Z') return c - 'A';
-    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
-    if (c >= '0' && c <= '9') return c - '0' + 52;
-    if (c == '+') return 62;
-    if (c == '/') return 63;
-    if (c == '=') return 0;
-    return -1;
-}
-
-ssize_t slibc_base64_decode(const char *src, size_t len, uint8_t *out) {
-    size_t oi = 0;
-    for (size_t i = 0; i + 3 < len; i += 4) {
-        int a = _b64val(src[i]),   b = _b64val(src[i+1]);
-        int c = _b64val(src[i+2]), d = _b64val(src[i+3]);
-        if (a < 0 || b < 0 || c < 0 || d < 0) return -1;
-        out[oi++] = (uint8_t)((a << 2) | (b >> 4));
-        if (src[i+2] != '=') out[oi++] = (uint8_t)((b << 4) | (c >> 2));
-        if (src[i+3] != '=') out[oi++] = (uint8_t)((c << 6) | d);
-    }
-    return (ssize_t)oi;
-}
-
-/* ================================================================
- *  UUID v4
- * ================================================================ */
-
-void slibc_uuid4(SRng *rng, SUUID *out) {
-    slibc_rng_fill(rng, out->b, 16);
-    out->b[6] = (out->b[6] & 0x0F) | 0x40;  /* version 4 */
-    out->b[8] = (out->b[8] & 0x3F) | 0x80;  /* variant bits */
-}
-
-void slibc_uuid_str(const SUUID *u, char buf[37]) {
-    const uint8_t *b = u->b;
-    snprintf(buf, 37,
-        "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-"
-        "%02x%02x%02x%02x%02x%02x",
-        b[0],b[1],b[2],b[3], b[4],b[5], b[6],b[7], b[8],b[9],
-        b[10],b[11],b[12],b[13],b[14],b[15]);
-}
-
-/* ================================================================
- *  strerror — human-readable error description
- * ================================================================ */
-
-const char *strerror(int errnum) {
-    /* Systrix error codes are stored as negative values; normalise. */
-    if (errnum < 0) errnum = -errnum;
-    switch (errnum) {
-    case 1:   return "Operation not permitted";
-    case 2:   return "No such file or directory";
-    case 3:   return "No such process";
-    case 4:   return "Interrupted system call";
-    case 5:   return "I/O error";
-    case 9:   return "Bad file descriptor";
-    case 10:  return "No child processes";
-    case 11:  return "Resource temporarily unavailable";
-    case 12:  return "Out of memory";
-    case 13:  return "Permission denied";
-    case 14:  return "Bad address";
-    case 16:  return "Device or resource busy";
-    case 17:  return "File exists";
-    case 19:  return "No such device";
-    case 20:  return "Not a directory";
-    case 21:  return "Is a directory";
-    case 22:  return "Invalid argument";
-    case 23:  return "File table overflow";
-    case 24:  return "Too many open files";
-    case 28:  return "No space left on device";
-    case 30:  return "Read-only file system";
-    case 32:  return "Broken pipe";
-    case 34:  return "Numerical result out of range";
-    case 36:  return "File name too long";
-    case 38:  return "Function not implemented";
-    case 39:  return "Directory not empty";
-    case 75:  return "Value too large for defined data type";
-    case 95:  return "Operation not supported";
-    case 101: return "Network is unreachable";
-    case 106: return "Transport endpoint is already connected";
-    case 107: return "Transport endpoint is not connected";
-    case 110: return "Connection timed out";
-    case 111: return "Connection refused";
-    case 114: return "Operation already in progress";
-    case 115: return "Operation now in progress";
-    default:  return "Unknown error";
-    }
-}
-
-/* ================================================================
- *  Path utilities
- * ================================================================ */
-
-int slibc_path_join(char *dst, size_t dst_sz,
-                    const char *base, const char *name) {
-    if (!dst || dst_sz == 0) return -1;
-    dst[0] = '\0';
-
-    /* Absolute name replaces base entirely */
-    if (name && name[0] == '/') {
-        size_t n = strlcpy(dst, name, dst_sz);
-        return (n < dst_sz) ? 0 : -1;
-    }
-
-    /* Copy base, then append separator if needed, then name */
-    size_t blen = base ? strlcpy(dst, base, dst_sz) : 0;
-    if (blen >= dst_sz) return -1;
-
-    if (name && name[0]) {
-        /* Ensure exactly one separator between base and name */
-        if (blen > 0 && dst[blen - 1] != '/') {
-            if (blen + 1 >= dst_sz) return -1;
-            dst[blen++] = '/';
-            dst[blen]   = '\0';
-        }
-        size_t remaining = dst_sz - blen;
-        size_t nlen = strlcpy(dst + blen, name, remaining);
-        if (nlen >= remaining) return -1;
-    }
-    return 0;
-}
-
-char *slibc_path_normalize(char *path) {
-    if (!path || !path[0]) return path;
-
-    int abs = (path[0] == '/');
-    char *src = path;
-    char *dst = path;
-
-    /* Temporary stack of component-start offsets for ".." handling.
-     * We work purely in-place using two pointers.                  */
-    while (*src) {
-        /* Skip duplicate slashes */
-        if (*src == '/') {
-            if (dst == path || *(dst - 1) != '/') *dst++ = '/';
-            src++;
-            continue;
-        }
-        /* Dot component */
-        if (src[0] == '.') {
-            if (src[1] == '/' || src[1] == '\0') {
-                /* "." — skip */
-                src += (src[1] == '/') ? 2 : 1;
-                continue;
-            }
-            if (src[1] == '.' && (src[2] == '/' || src[2] == '\0')) {
-                /* ".." — back up one component */
-                src += (src[2] == '/') ? 3 : 2;
-                if (dst > path + abs) dst--; /* step off the separator */
-                while (dst > path + abs && *(dst - 1) != '/') dst--;
-                /* If we backed up to the root slash, keep it */
-                if (abs && dst == path) { *dst++ = '/'; }
-                continue;
-            }
-        }
-        /* Copy the next path component */
-        while (*src && *src != '/') *dst++ = *src++;
-    }
-
-    /* Strip trailing slash (unless root) */
-    if (dst > path + abs && *(dst - 1) == '/') dst--;
-
-    *dst = '\0';
-    if (dst == path) { path[0] = abs ? '/' : '.'; path[1] = '\0'; }
-    return path;
-}
-
-const char *slibc_path_basename(const char *path) {
-    if (!path || !path[0]) return ".";
-
-    /* Find the end of the string, skipping trailing slashes */
-    const char *end = path + strlen(path) - 1;
-    while (end > path && *end == '/') end--;
-
-    /* Special case: root */
-    if (end == path && *path == '/') return "/";
-
-    /* Find the last '/' before end */
-    const char *p = end;
-    while (p > path && *(p - 1) != '/') p--;
-    return p;
-}
-
-int slibc_path_dirname(const char *path, char *dst, size_t dst_sz) {
-    if (!dst || dst_sz == 0) return -1;
-    if (!path || !path[0]) {
-        strlcpy(dst, ".", dst_sz);
-        return 0;
-    }
-
-    /* Find effective end (strip trailing slashes) */
-    size_t len = strlen(path);
-    while (len > 1 && path[len - 1] == '/') len--;
-
-    /* Find last separator */
-    size_t last = len;
-    while (last > 0 && path[last - 1] != '/') last--;
-
-    if (last == 0) {
-        /* No separator found → dirname is "." */
-        strlcpy(dst, ".", dst_sz);
-        return 0;
-    }
-
-    /* Strip the separator itself (unless it's the root '/') */
-    if (last > 1) last--;
-
-    size_t n = strlcpy(dst, path, (last + 1 < dst_sz) ? last + 1 : dst_sz);
-    if (last < dst_sz) dst[last] = '\0';
-    return (n <= last) ? 0 : -1;
-}
-
-int slibc_path_has_ext(const char *path, const char *ext) {
-    if (!path || !ext) return 0;
-    const char *dot = NULL;
-    for (const char *p = path; *p; p++)
-        if (*p == '.') dot = p;
-    if (!dot) return 0;
-    return strcasecmp(dot + 1, ext) == 0;
-}
-
-/* ================================================================
- *  String padding / column formatting
- * ================================================================ */
 
 size_t slibc_str_repeat(char *buf, char c, size_t count) {
     for (size_t i = 0; i < count; i++) buf[i] = c;
@@ -1777,20 +1546,15 @@ size_t slibc_str_pad(char *dst, size_t dst_sz,
                      const char *str, size_t width,
                      char pad_char, int left_align) {
     if (!dst || dst_sz == 0) return 0;
-
     size_t slen = strnlen(str ? str : "", dst_sz);
-    /* Clamp slen to width */
     if (slen > width) slen = width;
     size_t pad = (width > slen) ? width - slen : 0;
-
-    /* Ensure we fit in dst_sz (including NUL) */
     size_t total = slen + pad;
     if (total + 1 > dst_sz) {
         total = dst_sz - 1;
         if (total >= slen) pad = total - slen;
-        else               { slen = total; pad = 0; }
+        else { slen = total; pad = 0; }
     }
-
     char *p = dst;
     if (!left_align) {
         for (size_t i = 0; i < pad; i++) *p++ = pad_char;
@@ -1803,57 +1567,18 @@ size_t slibc_str_pad(char *dst, size_t dst_sz,
     return (size_t)(p - dst);
 }
 
-void slibc_fmt_progress(char *buf, size_t total_width,
-                        uint64_t numerator, uint64_t denominator) {
-    if (!buf || total_width == 0) return;
-    if (denominator == 0) denominator = 1;
-    if (numerator > denominator) numerator = denominator;
 
-    size_t filled = (size_t)((numerator * total_width) / denominator);
-    if (filled > total_width) filled = total_width;
-
-    buf[0] = '[';
-    size_t i;
-    for (i = 0; i < filled; i++)
-        buf[1 + i] = (i + 1 == filled && filled < total_width) ? '>' : '=';
-    for (; i < total_width; i++)
-        buf[1 + i] = ' ';
-    buf[1 + total_width] = ']';
-    buf[2 + total_width] = '\0';
-}
-
-/* ================================================================
- *  SStrBuf — simple dynamic string builder
- *  (Requires malloc / free — kernel must provide them.)
- * ================================================================ */
-
-/* Forward-declare malloc/free/realloc so this compiles in kernel context
- * where they are provided by the kernel heap.                     */
-#ifdef SYSTRIX_KERNEL
-extern void *heap_malloc(size_t);
-extern void  heap_free(void *);
-extern void *heap_realloc(void *, size_t);
-static inline void  free   (void *p)           { heap_free(p); }
-static inline void *realloc(void *p, size_t n) { return heap_realloc(p, n); }
-#else
-extern void *malloc (size_t);
-extern void  free   (void *);
-extern void *realloc(void *, size_t);
-#endif
+/* ═══════════════════════════════════════════════════════════════════════
+ *  §22  Dynamic string builder (SStrBuf)
+ * ═══════════════════════════════════════════════════════════════════════ */
 
 #define SSBUF_INIT_CAP 64
 
-void slibc_sb_init(SStrBuf *sb) {
-    sb->data = NULL;
-    sb->len  = 0;
-    sb->cap  = 0;
-}
+void slibc_sb_init(SStrBuf *sb) { sb->data = NULL; sb->len = sb->cap = 0; }
 
 void slibc_sb_free(SStrBuf *sb) {
     if (sb->data) free(sb->data);
-    sb->data = NULL;
-    sb->len  = 0;
-    sb->cap  = 0;
+    sb->data = NULL; sb->len = sb->cap = 0;
 }
 
 void slibc_sb_reset(SStrBuf *sb) {
@@ -1867,26 +1592,18 @@ static int _sb_grow(SStrBuf *sb, size_t need) {
     while (ncap < need) ncap *= 2;
     char *nd = (char *)realloc(sb->data, ncap);
     if (!nd) return -1;
-    sb->data = nd;
-    sb->cap  = ncap;
+    sb->data = nd; sb->cap = ncap;
     return 0;
 }
 
 int slibc_sb_appendn(SStrBuf *sb, const char *s, size_t n) {
     if (_sb_grow(sb, sb->len + n + 1) < 0) return -1;
     memcpy(sb->data + sb->len, s, n);
-    sb->len += n;
-    sb->data[sb->len] = '\0';
+    sb->len += n; sb->data[sb->len] = '\0';
     return 0;
 }
-
-int slibc_sb_append(SStrBuf *sb, const char *s) {
-    return slibc_sb_appendn(sb, s, strlen(s));
-}
-
-int slibc_sb_appendc(SStrBuf *sb, char c) {
-    return slibc_sb_appendn(sb, &c, 1);
-}
+int slibc_sb_append (SStrBuf *sb, const char *s) { return slibc_sb_appendn(sb, s, strlen(s)); }
+int slibc_sb_appendc(SStrBuf *sb, char c)        { return slibc_sb_appendn(sb, &c, 1); }
 
 int slibc_sb_appendf(SStrBuf *sb, const char *fmt, ...) {
     char tmp[256];
@@ -1896,7 +1613,7 @@ int slibc_sb_appendf(SStrBuf *sb, const char *fmt, ...) {
     va_end(ap);
     if (n < 0) return -1;
     if ((size_t)n < sizeof(tmp)) return slibc_sb_appendn(sb, tmp, (size_t)n);
-    /* Rare: output was truncated — grow and retry */
+    /* output was truncated — allocate exact size and retry */
     char *big = (char *)malloc((size_t)n + 1);
     if (!big) return -1;
     va_start(ap, fmt);
@@ -1910,12 +1627,116 @@ int slibc_sb_appendf(SStrBuf *sb, const char *fmt, ...) {
 char *slibc_sb_steal(SStrBuf *sb) {
     char *p = sb->data;
     if (!p) {
-        /* Return an empty heap string rather than NULL */
         p = (char *)malloc(1);
         if (p) p[0] = '\0';
     }
-    sb->data = NULL;
-    sb->len  = 0;
-    sb->cap  = 0;
+    sb->data = NULL; sb->len = sb->cap = 0;
     return p;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════
+ *  §23  Path utilities
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+int slibc_path_join(char *dst, size_t dst_sz,
+                    const char *base, const char *name) {
+    if (!dst || dst_sz == 0) return -1;
+    dst[0] = '\0';
+    if (name && name[0] == '/') {
+        size_t n = strlcpy(dst, name, dst_sz);
+        return (n < dst_sz) ? 0 : -1;
+    }
+    size_t blen = base ? strlcpy(dst, base, dst_sz) : 0;
+    if (blen >= dst_sz) return -1;
+    if (name && name[0]) {
+        if (blen > 0 && dst[blen - 1] != '/') {
+            if (blen + 1 >= dst_sz) return -1;
+            dst[blen++] = '/'; dst[blen] = '\0';
+        }
+        size_t nlen = strlcpy(dst + blen, name, dst_sz - blen);
+        if (nlen >= dst_sz - blen) return -1;
+    }
+    return 0;
+}
+
+char *slibc_path_normalize(char *path) {
+    if (!path || !path[0]) return path;
+    int abs = (path[0] == '/');
+    char *src = path, *dst = path;
+    while (*src) {
+        if (*src == '/') {
+            if (dst == path || *(dst - 1) != '/') *dst++ = '/';
+            src++; continue;
+        }
+        if (src[0] == '.') {
+            if (src[1] == '/' || src[1] == '\0') {
+                src += (src[1] == '/') ? 2 : 1; continue;
+            }
+            if (src[1] == '.' && (src[2] == '/' || src[2] == '\0')) {
+                src += (src[2] == '/') ? 3 : 2;
+                if (dst > path + abs) dst--;
+                while (dst > path + abs && *(dst - 1) != '/') dst--;
+                if (abs && dst == path) { *dst++ = '/'; }
+                continue;
+            }
+        }
+        while (*src && *src != '/') *dst++ = *src++;
+    }
+    if (dst > path + abs && *(dst - 1) == '/') dst--;
+    *dst = '\0';
+    if (dst == path) { path[0] = abs ? '/' : '.'; path[1] = '\0'; }
+    return path;
+}
+
+const char *slibc_path_basename(const char *path) {
+    if (!path || !path[0]) return ".";
+    const char *end = path + strlen(path) - 1;
+    while (end > path && *end == '/') end--;
+    if (end == path && *path == '/') return "/";
+    const char *p = end;
+    while (p > path && *(p - 1) != '/') p--;
+    return p;
+}
+
+int slibc_path_dirname(const char *path, char *dst, size_t dst_sz) {
+    if (!dst || dst_sz == 0) return -1;
+    if (!path || !path[0]) { strlcpy(dst, ".", dst_sz); return 0; }
+    size_t len = strlen(path);
+    while (len > 1 && path[len - 1] == '/') len--;
+    size_t last = len;
+    while (last > 0 && path[last - 1] != '/') last--;
+    if (last == 0) { strlcpy(dst, ".", dst_sz); return 0; }
+    if (last > 1) last--;
+    size_t n = strlcpy(dst, path, (last + 1 < dst_sz) ? last + 1 : dst_sz);
+    if (last < dst_sz) dst[last] = '\0';
+    return (n <= last) ? 0 : -1;
+}
+
+int slibc_path_has_ext(const char *path, const char *ext) {
+    if (!path || !ext) return 0;
+    const char *dot = NULL;
+    for (const char *p = path; *p; p++) if (*p == '.') dot = p;
+    if (!dot) return 0;
+    return strcasecmp(dot + 1, ext) == 0;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════
+ *  §24  UUID v4 generation
+ *
+ *  Format: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
+ *  where x = random hex, y ∈ {8, 9, a, b}
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+void slibc_uuid_v4(SRng *rng, char *buf) {
+    uint8_t b[16];
+    slibc_rng_fill(rng, b, 16);
+    b[6] = (b[6] & 0x0F) | 0x40;   /* version 4 */
+    b[8] = (b[8] & 0x3F) | 0x80;   /* variant 1 (RFC 4122) */
+    snprintf(buf, 37,
+        "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-"
+        "%02x%02x%02x%02x%02x%02x",
+        b[0],b[1],b[2],b[3], b[4],b[5], b[6],b[7], b[8],b[9],
+        b[10],b[11],b[12],b[13],b[14],b[15]);
 }

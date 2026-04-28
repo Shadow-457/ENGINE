@@ -623,6 +623,9 @@ void  gui_handle_right_click(int px, int py);
 void  gui_handle_drag(int px, int py);
 void  gui_stop_drag(void);
 void  gui_stop_resize(void);
+
+/* pngview.c — PNG image viewer command */
+void  cmd_photo(const char *filename);
 int   gui_window_create(int x, int y, int w, int h, const char *title);
 void  gui_window_close(int id);
 void  gui_window_set_active(int id);

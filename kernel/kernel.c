@@ -28,6 +28,11 @@ static int scroll_offset = 0;
 
 static u8 cur_row = 0, cur_col = 0;
 
+/* Set to 1 when vga_putchar wraps at column 80; cleared immediately
+ * by the next call.  Lets an explicit '\n' after a col-wrap be
+ * absorbed rather than advancing cur_row a second time. */
+static int col_just_wrapped = 0;
+
 /* Update VGA hardware cursor to match cur_row / cur_col */
 static void vga_update_hw_cursor(void) {
     u16 pos = (u16)(cur_row * VGA_COLS + cur_col);
@@ -223,6 +228,7 @@ void vga_clear(void) {
     buf_next = VGA_ROWS % SCROLLBACK_ROWS;
     buf_total = VGA_ROWS;
     cur_row = cur_col = 0;
+    col_just_wrapped = 0;
     vga_update_hw_cursor();
 }
 
@@ -256,10 +262,30 @@ static void backbuf_advance(void) {
         back_buf[buf_next][i] = (u16)(VGA_ATTR << 8) | ' ';
 }
 
+/* Track whether the last character caused a column wrap.  Set to 1
+ * when writing the 80th character causes an implicit newline; cleared
+ * by the next vga_putchar call.  An explicit '\n' that arrives right
+ * after a col-wrap is a no-op row-advance (the wrap already advanced
+ * the row), preventing the double-advance that caused draw_screen to
+ * scroll all content off the top of the VGA buffer. */
+
 void vga_putchar(u8 c) {
-    if (c == '\r') { cur_col = 0; vga_update_hw_cursor(); return; }
+    if (c == '\r') {
+        cur_col = 0;
+        col_just_wrapped = 0;
+        vga_update_hw_cursor();
+        return;
+    }
 
     if (c == '\n') {
+        if (col_just_wrapped) {
+            /* The previous character already did the implicit newline
+             * (col-wrap).  This explicit '\n' is redundant — absorb it
+             * so we don't advance cur_row a second time. */
+            col_just_wrapped = 0;
+            return;
+        }
+        col_just_wrapped = 0;
         cur_col = 0;
         backbuf_advance();
         if (cur_row < VGA_ROWS - 1) {
@@ -271,6 +297,8 @@ void vga_putchar(u8 c) {
         return;
     }
 
+    col_just_wrapped = 0;
+
     /* Normal character — write to back-buffer current row */
     back_buf[buf_next][cur_col] = (u16)(VGA_ATTR << 8) | c;
 
@@ -281,6 +309,7 @@ void vga_putchar(u8 c) {
 
     if (++cur_col < VGA_COLS) { vga_update_hw_cursor(); return; }
     /* Wrap column → implicit newline */
+    col_just_wrapped = 1;
     cur_col = 0;
     backbuf_advance();
     if (cur_row < VGA_ROWS - 1) {
@@ -885,18 +914,14 @@ static void to_83(const char *name, char out[11]) {
     memset(out, ' ', 11);
     int i = 0, j = 0;
     while (name[i] && name[i] != '.' && j < 8) {
-        char c = name[i++];
-        if (c >= 'a' && c <= 'z') c = (char)(c - 32);
-        out[j++] = c;
+        out[j++] = (char)toupper((unsigned char)name[i++]);
     }
     while (name[i] && name[i] != '.') i++; /* skip rest of base */
     if (name[i] == '.') {
         i++;
         int k = 8;
         while (name[i] && k < 11) {
-            char c = name[i++];
-            if (c >= 'a' && c <= 'z') c = (char)(c - 32);
-            out[k++] = c;
+            out[k++] = (char)toupper((unsigned char)name[i++]);
         }
     }
 }
@@ -1112,8 +1137,8 @@ static inline u8 kb_translate(u8 sc, u8 shift, u8 caps) {
     if (sc >= 0x3A) return 0;
     u8 ch = shift ? kb_sc_shift[sc] : kb_sc[sc];
     if (!ch) return 0;
-    if (caps && ch >= 'a' && ch <= 'z') ch = (u8)(ch - 32);
-    else if (caps && ch >= 'A' && ch <= 'Z') ch = (u8)(ch + 32);
+    if (caps && islower((unsigned char)ch)) ch = (u8)toupper((unsigned char)ch);
+    else if (caps && isupper((unsigned char)ch)) ch = (u8)tolower((unsigned char)ch);
     return ch;
 }
 
@@ -1414,8 +1439,7 @@ void format_83_name(const char *src, char *dst) {
 
     /* name part (up to 8) */
     for (i = 0, j = 0; j < 8 && src[i] && src[i] != '.' && src[i] != ' '; i++, j++) {
-        u8 c = (u8)src[i];
-        dst[j] = (c >= 'a' && c <= 'z') ? (char)(c - 32) : (char)c;
+        dst[j] = (char)toupper((unsigned char)src[i]);
     }
     /* skip past dot */
     while (src[i] && src[i] != '.') i++;
@@ -1423,8 +1447,7 @@ void format_83_name(const char *src, char *dst) {
         i++;
         /* extension (up to 3) */
         for (int k = 0; k < 3 && src[i] && src[i] != ' '; i++, k++) {
-            u8 c = (u8)src[i];
-            dst[8 + k] = (c >= 'a' && c <= 'z') ? (char)(c - 32) : (char)c;
+            dst[8 + k] = (char)toupper((unsigned char)src[i]);
         }
     }
 }
@@ -1432,7 +1455,7 @@ void format_83_name(const char *src, char *dst) {
 /* ================================================================
  *  SHELL COMMANDS
  * ================================================================ */
-static char input_buf[128];
+static char input_buf[512];
 static char name83[12];
 static u8   cat_buf[513];
 
@@ -1762,10 +1785,8 @@ static void cmd_find(const char *pattern) {
                     for (int k = 0; k <= ni && !match; k++) {
                         pi = 0;
                         while (pattern[pi] && k + pi <= ni) {
-                            char a = name[k+pi];
-                            char b = pattern[pi];
-                            if (a >= 'A' && a <= 'Z') a += 32;
-                            if (b >= 'A' && b <= 'Z') b += 32;
+                            char a = (char)tolower((unsigned char)name[k+pi]);
+                            char b = (char)tolower((unsigned char)pattern[pi]);
                             if (a != b) break;
                             pi++;
                         }
@@ -1795,8 +1816,7 @@ static void cmd_head(const char *arg) {
     const char *a2 = get_arg(arg);
     int lines = 10;
     if (a2) {
-        lines = 0;
-        for (; *a2 >= '0' && *a2 <= '9'; a2++) lines = lines * 10 + (*a2 - '0');
+        lines = atoi(a2);
         if (!lines) lines = 10;
     }
     i64 fd = sh_open(arg);
@@ -1820,8 +1840,7 @@ static void cmd_tail(const char *arg) {
     const char *a2 = get_arg(arg);
     int lines = 10;
     if (a2) {
-        lines = 0;
-        for (; *a2 >= '0' && *a2 <= '9'; a2++) lines = lines * 10 + (*a2 - '0');
+        lines = atoi(a2);
         if (!lines) lines = 10;
     }
     i64 fd = sh_open(arg);
@@ -1940,6 +1959,84 @@ rmdir_check_done:
         kprintf("rmdir: failed\r\n");
 }
 
+/* ---- calc ------------------------------------------------------
+ * Evaluate a simple arithmetic expression:  <num> <op> <num>
+ * Supports: +  -  *  /  %  and optional parens around the whole expr.
+ * All arithmetic is 64-bit signed.  Division by zero is caught.
+ * Examples:
+ *   calc 6 * 7          → 42
+ *   calc 1024 / 8       → 128
+ *   calc 100 - 37       → 63
+ *   calc 7 % 3          → 1
+ *
+ * Extended form (no-spaces, e.g. "calc 3+4") is also accepted by
+ * the inline scanner below.
+ * ---------------------------------------------------------------- */
+
+/* Skip leading whitespace, parse a signed 64-bit integer, advance *pp. */
+static i64 calc_parse_int(const char **pp) {
+    const char *p = *pp;
+    while (isspace((unsigned char)*p)) p++;
+    i64 neg = 1;
+    if (*p == '-') { neg = -1; p++; }
+    else if (*p == '+') { p++; }
+    if (!isdigit((unsigned char)*p)) { *pp = p; return INT64_MIN; } /* sentinel = parse error */
+    i64 v = 0;
+    while (isdigit((unsigned char)*p))
+        v = v * 10 + (*p++ - '0');
+    *pp = p;
+    return neg * v;
+}
+
+static void cmd_calc(const char *arg) {
+    if (!arg || !*arg) {
+        kprintf("Usage: calc <expr>   e.g.  calc 6 * 7\r\n");
+        kprintf("  Operators: + - * / %%\r\n");
+        return;
+    }
+
+    const char *p = arg;
+    i64 a = calc_parse_int(&p);
+    if (a == INT64_MIN) { kprintf("calc: invalid number\r\n"); return; }
+
+    while (isspace((unsigned char)*p)) p++;
+    if (!*p) {
+        /* Single number — just echo it */
+        kprintf("%lld\r\n", (long long)a);
+        return;
+    }
+
+    char op = *p++;
+
+    i64 b = calc_parse_int(&p);
+    if (b == INT64_MIN) { kprintf("calc: invalid number after operator\r\n"); return; }
+
+    /* Skip any trailing chars (spaces, closing paren, etc.) */
+    while (isspace((unsigned char)*p)) p++;
+    if (*p) { kprintf("calc: unexpected input after expression\r\n"); return; }
+
+    i64 result;
+    switch (op) {
+        case '+': result = a + b; break;
+        case '-': result = a - b; break;
+        case '*': result = a * b; break;
+        case 'x': result = a * b; break;   /* 'x' as alternative multiply */
+        case '/':
+            if (b == 0) { kprintf("calc: division by zero\r\n"); return; }
+            result = a / b;
+            break;
+        case '%':
+            if (b == 0) { kprintf("calc: modulo by zero\r\n"); return; }
+            result = a % b;
+            break;
+        default:
+            kprintf("calc: unknown operator '%c'  (use + - * / %%)\r\n", op);
+            return;
+    }
+
+    kprintf("%lld\r\n", (long long)result);
+}
+
 /* ---- wc -------------------------------------------------------- */
 static void cmd_wc(const char *name) {
     i64 fd = sh_open(name);
@@ -1953,7 +2050,7 @@ static void cmd_wc(const char *name) {
             u8 c = cat_buf[i];
             bytes++;
             if (c == '\n') lines++;
-            if (c == ' ' || c == '\t' || c == '\r' || c == '\n') in_word = 0;
+            if (isspace((unsigned char)c)) in_word = 0;
             else if (!in_word) { in_word = 1; words++; }
         }
     }
@@ -2023,6 +2120,71 @@ static void cmd_touch(const char *name) {
     fd = sh_create(name, 0644);
     if (fd >= 0) sh_close(fd);
     kprintf("File created.\r\n");
+}
+
+/* mktxt FILE1 FILE2 FILE3 ...
+ * Creates any number of empty .txt files in one command.
+ * Names are space-separated; each is auto-suffixed with .TXT if
+ * no extension is given, and uppercased to satisfy FAT32 8.3 rules. */
+static void cmd_mktxt(const char *arg) {
+    if (!arg || !arg[0]) {
+        kprintf("Usage: mktxt <name1> [name2] [name3] ...\r\n");
+        kprintf("  Creates one or more empty text files.\r\n");
+        kprintf("  Extensions are optional — .TXT is added automatically.\r\n");
+        return;
+    }
+
+    int created = 0, skipped = 0;
+    const char *p = arg;
+
+    while (p && *p) {
+        /* skip leading spaces */
+        while (*p == ' ') p++;
+        if (!*p) break;
+
+        /* copy one token into name[] */
+        char name[16];
+        int ni = 0;
+        while (*p && *p != ' ' && ni < 15) name[ni++] = *p++;
+        name[ni] = '\0';
+        if (!ni) continue;
+
+        /* uppercase the whole name */
+        for (int i = 0; i < ni; i++) {
+            if (name[i] >= 'a' && name[i] <= 'z')
+                name[i] = (char)(name[i] - 32);
+        }
+
+        /* auto-append .TXT if there is no dot in the name */
+        int has_dot = 0;
+        for (int i = 0; i < ni; i++) if (name[i] == '.') { has_dot = 1; break; }
+        if (!has_dot && ni <= 8) {
+            /* room for .TXT (4 chars) */
+            name[ni++] = '.';
+            name[ni++] = 'T';
+            name[ni++] = 'X';
+            name[ni++] = 'T';
+            name[ni]   = '\0';
+        }
+
+        /* create only if it doesn't already exist */
+        i64 fd = sh_open(name);
+        if (fd >= 0) {
+            sh_close(fd);
+            kprintf("  skip  %s  (already exists)\r\n", name);
+            skipped++;
+        } else {
+            fd = sh_create(name, 0644);
+            if (fd >= 0) {
+                sh_close(fd);
+                kprintf("  ok    %s\r\n", name);
+                created++;
+            } else {
+                kprintf("  fail  %s\r\n", name);
+            }
+        }
+    }
+    kprintf("%d created, %d skipped.\r\n", created, skipped);
 }
 
 static void cmd_rm(const char *name) {
@@ -2258,12 +2420,16 @@ static void cmd_gui(void) {
 
                 /* Left button press (rising edge) → mouse down */
                 if (lbtn_curr && !lbtn_prev) {
-                    gui_handle_mouse_down(-1, -1);
+                    int cx, cy;
+                    gui_cursor_get(&cx, &cy);
+                    gui_handle_mouse_down(cx, cy);
                 }
 
                 /* Left button release (falling edge) → mouse up, stop drag+resize */
                 if (!lbtn_curr && lbtn_prev) {
-                    gui_handle_mouse_up(-1, -1);
+                    int cx, cy;
+                    gui_cursor_get(&cx, &cy);
+                    gui_handle_mouse_up(cx, cy);
                     gui_stop_drag();
                     gui_stop_resize();
                 }
@@ -2388,6 +2554,7 @@ static void exec_cmd(void) {
         "  df                   disk free\r\n"
         "\r\n"
         "  touch <file>         create empty file\r\n"
+        "  mktxt <f1> [f2] ...  create multiple text files at once\r\n"
         "  write <file> <txt>   overwrite file\r\n"
         "  append <file> <txt>  append line to file\r\n"
         "  rm <file>            delete file\r\n"
@@ -2399,7 +2566,9 @@ static void exec_cmd(void) {
         "Processes: elf <f>  run <f>  ps\r\n"
         "Network:   ifconfig  ping  wget  serve  netcat\r\n"
         "System:    meminfo  uname  uptime  df  clear  reboot  halt\r\n"
-        "GUI:       gui                launch retro GUI demo\r\n"
+        "Math:      calc <n> <op> <n>     e.g.  calc 6 * 7\r\n"
+        "GUI:       gui                launch retro GUI demo\r\n"\
+        "           photo <f.png>        view PNG image (ESC to return)\r\n"
         "Display:   720p  1080p        switch resolution (while in GUI)\r\n"
         "           browser            web browser (coming soon)\r\n"))
 
@@ -2418,6 +2587,7 @@ static void exec_cmd(void) {
     CMD("wc",      { if (arg) cmd_wc(arg);      else kprintf("Usage: wc <file>\r\n"); })
     CMD("find",    { cmd_find(arg); })
     CMD("touch",   { if (arg) cmd_touch(arg);   else kprintf("Usage: touch <file>\r\n"); })
+    CMD("mktxt",   { cmd_mktxt(arg); })
     CMD("write",   { if (arg) cmd_write(arg);   else kprintf("Usage: write <file> <text>\r\n"); })
     CMD("append",  { if (arg) cmd_append(arg);  else kprintf("Usage: append <file> <text>\r\n"); })
     CMD("rm",      { if (arg) cmd_rm(arg);      else kprintf("Usage: rm <file>\r\n"); })
@@ -2429,6 +2599,8 @@ static void exec_cmd(void) {
     /* --- processes --- */
     CMD("run",     { if (arg) cmd_run(arg);     else kprintf("Usage: run <file>\r\n"); })
     CMD("elf",     { if (arg) cmd_elf(arg);     else kprintf("Usage: elf <file>\r\n"); })
+    CMD("calc",    { cmd_calc(arg); })
+    CMD("photo",   { if (arg) cmd_photo(arg); else kprintf("Usage: photo <file.png>\r\n"); })
 
 #undef CMD
 

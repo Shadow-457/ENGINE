@@ -76,7 +76,8 @@ KERNEL_C_OBJS = \
     kernel/ps2.o       \
     kernel/e1000.o     \
     kernel/shell.o     \
-    kernel/pkgmgr.o
+    kernel/pkgmgr.o \
+    kernel/pngview.o
 
 KERNEL_OBJS = $(KERNEL_ASM_OBJS) $(KERNEL_C_OBJS)
 
@@ -253,6 +254,45 @@ addprog: fat32.img
 	MTOOLS_SKIP_CHECK=1 mcopy -o -i fat32.img $(PROG) ::/$(notdir $(PROG))
 	dd if=fat32.img of=systrix.img bs=512 seek=512 conv=notrunc status=none
 	@echo "Added $(notdir $(PROG)) to systrix.img -- run with: elf $(notdir $(PROG))"
+
+# -- Sync host home/ folder → OS filesystem root -------------------
+# Place any files you want inside SystrixOS into the host folder ./home/
+# then run:  make synchome
+# They will appear in the OS root ( / ) when you boot.
+# Sub-folders are copied recursively (mcopy -s).
+#
+# FAT32 filename rules (enforced by the filesystem):
+#   - Max 8 chars name + 3 chars extension, uppercase
+#   - e.g. MYFILE.TXT, MYPROG, SHOT.PNG
+#   - mtools will warn/mangle names that are too long or lowercase
+synchome: fat32.img
+	@if [ ! -d home ]; then \
+	    echo "home/ folder not found — creating it for you."; \
+	    mkdir -p home; \
+	    echo "Put files into home/ then run make synchome again."; \
+	    exit 0; \
+	fi
+	@if [ -z "$$(ls -A home 2>/dev/null)" ]; then \
+	    echo "home/ is empty — nothing to sync."; \
+	    exit 0; \
+	fi
+	@echo "Syncing home/* → FAT32 filesystem root..."
+	MTOOLS_SKIP_CHECK=1 mcopy -s -o -i fat32.img home/* ::/
+	dd if=fat32.img of=systrix.img bs=512 seek=512 conv=notrunc status=none
+	@echo "Done. Contents of OS filesystem root:"
+	@MTOOLS_SKIP_CHECK=1 mdir -i fat32.img ::/ 2>/dev/null || true
+	@echo "Boot with: make run"
+
+# -- Sync home/ then immediately boot ------------------------------
+run-home: synchome
+	$(QEMU) -drive format=raw,file=systrix.img,if=ide \
+	        -m 1G -no-reboot \
+	        -machine pc,accel=tcg \
+	        $(DISP) $(USBHID) \
+	        $(NIC) \
+	        $(AUDIO)
+
+.PHONY: synchome run-home
 
 # -- Add sample .shadow source files to disk -----------------------
 addshadow: fat32.img

@@ -1,0 +1,84 @@
+HOW TO ADD THE PHOTO COMMAND TO SYSTRIXOS
+==========================================
+
+1. COPY FILES
+-------------
+Copy the two new source files into your tree:
+
+  cp pngview.c   SystrixOS-updated/kernel/pngview.c
+  cp png.c       SystrixOS-updated/browser/png.c       (replaces the stub)
+
+
+2. PATCH Makefile  (inside SystrixOS-updated/)
+-----------------------------------------------
+Add  kernel/pngview.o  to the KOBJ list.
+Find the line:
+
+    kernel/pkgmgr.o
+
+Change it to:
+
+    kernel/pkgmgr.o \
+    kernel/pngview.o
+
+The wildcard rule  kernel/%.o: kernel/%.c  already handles compilation.
+
+
+3. PATCH include/kernel.h
+--------------------------
+Add this line after the gui_stop_resize() declaration (~line 625):
+
+    /* pngview.c — PNG image viewer command */
+    void  cmd_photo(const char *filename);
+
+
+4. PATCH kernel/kernel.c
+-------------------------
+a) In exec_cmd(), after the calc CMD line, add:
+
+    CMD("photo",   { if (arg) cmd_photo(arg); else kprintf("Usage: photo <file.png>\r\n"); })
+
+b) In the help text block, after the "GUI:" line, add:
+
+    "           photo <f.png>        view PNG image (ESC to return)\r\n"
+
+
+5. BUILD
+---------
+  make clean && make lynx-all && make run
+
+
+HOW IT WORKS
+============
+- browser/png.c encodes a 32-bit XRGB framebuffer to a valid PNG
+  using uncompressed deflate blocks (no compression library needed).
+
+- kernel/pngview.c decodes those PNGs:
+    * Reads the file through the VFS
+    * Parses IHDR + IDAT chunks
+    * Unpacks uncompressed deflate blocks
+    * Applies PNG filter reconstruction (types 0–4)
+    * Blits the image centred on the framebuffer over a black bg
+    * Shows a "Press ESC to return" hint bar at the bottom
+    * Waits for ESC scancode (0x01) then clears the framebuffer
+      and returns to the shell
+
+USAGE
+=====
+  # The framebuffer must be active first:
+  gui           ← launches GUI, press ESC to go back to CLI
+
+  # Then:
+  photo myphoto.png
+
+  # Press ESC to return to the CLI
+
+CREATING TEST PNGs
+==================
+Use the updated browser/png.c from user space, or copy any small
+8-bit RGB PNG onto the FAT32 disk image (mtools):
+
+  mtools -i fat32.img mcopy myphoto.png ::/MYPHOTO.PNG
+
+Then in the OS shell:  photo MYPHOTO.PNG
+(FAT32 names are uppercase 8.3 format)

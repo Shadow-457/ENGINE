@@ -366,8 +366,8 @@ static void ps2_decode_key(u8 sc) {
             use_shift ^= 1;
         ascii = use_shift ? sc1_shift[key] : sc1_ascii[key];
         /* Ctrl sequences */
-        if (kb_ctrl && ascii >= 'a' && ascii <= 'z') ascii -= 96;
-        if (kb_ctrl && ascii >= 'A' && ascii <= 'Z') ascii -= 64;
+        if (kb_ctrl && islower((unsigned char)ascii)) ascii = (u8)(ascii - 96);
+        if (kb_ctrl && isupper((unsigned char)ascii)) ascii = (u8)(ascii - 64);
     }
     if (ascii) input_push_key(key, ascii);
 }

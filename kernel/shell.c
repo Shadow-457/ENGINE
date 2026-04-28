@@ -100,7 +100,7 @@ static int shell_parse_line(const char *line, shell_pipeline_t *pipeline) {
     pipeline->cmd_count = 0;
     pipeline->pipe_count = 0;
     while (*p) {
-        while (*p == ' ' || *p == '\t') p++;
+        while (isspace((unsigned char)*p) && *p != '\n') p++;
         if (!*p) break;
         if (pipeline->cmd_count >= SHELL_MAX_CMDS) break;
         shell_cmd_t *cmd = &pipeline->cmds[pipeline->cmd_count];
@@ -110,13 +110,13 @@ static int shell_parse_line(const char *line, shell_pipeline_t *pipeline) {
         cmd->append_output = 0;
         cmd->background = 0;
         while (*p && *p != '|' && *p != '>' && *p != '<' && *p != '&' && *p != '\n') {
-            while (*p == ' ' || *p == '\t') p++;
+            while (isspace((unsigned char)*p) && *p != '\n') p++;
             if (!*p || *p == '|' || *p == '>' || *p == '<' || *p == '&') break;
             if (cmd->argc >= SHELL_MAX_ARGS - 1) break;
             cmd->argv[cmd->argc] = p;
             cmd->argc++;
-            while (*p && *p != ' ' && *p != '\t' && *p != '|' && *p != '>' && *p != '<' && *p != '&') p++;
-            if (*p == ' ' || *p == '\t') { *p = 0; p++; }
+            while (*p && !isspace((unsigned char)*p) && *p != '|' && *p != '>' && *p != '<' && *p != '&') p++;
+            if (isspace((unsigned char)*p) && *p != '\n') { *p = 0; p++; }
         }
         cmd->argv[cmd->argc] = NULL;
         if (*p == '|') {
@@ -126,15 +126,15 @@ static int shell_parse_line(const char *line, shell_pipeline_t *pipeline) {
         } else if (*p == '>') {
             p++;
             if (*p == '>') { cmd->append_output = 1; p++; }
-            while (*p == ' ' || *p == '\t') p++;
+            while (isspace((unsigned char)*p) && *p != '\n') p++;
             cmd->output_redirect = p;
-            while (*p && *p != ' ' && *p != '\t' && *p != '|' && *p != '&') p++;
+            while (*p && !isspace((unsigned char)*p) && *p != '|' && *p != '&') p++;
             if (*p) { *p = 0; p++; }
         } else if (*p == '<') {
             p++;
-            while (*p == ' ' || *p == '\t') p++;
+            while (isspace((unsigned char)*p) && *p != '\n') p++;
             cmd->input_redirect = p;
-            while (*p && *p != ' ' && *p != '\t' && *p != '|' && *p != '&') p++;
+            while (*p && !isspace((unsigned char)*p) && *p != '|' && *p != '&') p++;
             if (*p) { *p = 0; p++; }
         } else if (*p == '&') {
             cmd->background = 1;

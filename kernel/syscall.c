@@ -63,6 +63,9 @@ i64 sys_read(u64 fd, void *buf, usize n) {
 /* ── 1: sys_write ────────────────────────────────────────────── */
 i64 sys_write(u64 fd, const void *buf, usize n) {
     if (fd == 1 || fd == 2) {
+        /* DEBUG: bright-yellow 'W' at row 0, col 78.
+         * Visible = sys_write(fd=1) was called. */
+        ((u16*)0xB8000)[78] = (u16)(0x3F << 8) | 'W';
         const u8 *p = (const u8*)buf;
         for (usize i = 0; i < n; i++) vga_putchar(p[i]);
         return (i64)n;
@@ -859,4 +862,10 @@ i64 sys_getcwd_real(char *buf, usize sz) {
 /* Calls the existing vga_clear() which writes blanks to 0xB8000  */
 /* and resets cur_row/cur_col to 0, so vga_putchar starts fresh.  */
 void vga_clear(void);   /* defined in kernel.c */
-i64  sys_vga_clear(void) { vga_clear(); return 0; }
+i64  sys_vga_clear(void) {
+    vga_clear();
+    /* DEBUG: bright-green 'C' at top-right (row 0, col 79).
+     * Visible = sys_vga_clear ran. Disappears = something clears after. */
+    ((u16*)0xB8000)[79] = (u16)(0x2F << 8) | 'C';
+    return 0;
+}
