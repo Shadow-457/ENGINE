@@ -1540,6 +1540,10 @@ void gui_redraw(void){
     g_dmg_w = 0;
 }
 
+void cursor_blink_tick(void){
+    g_clock_ticks++;
+}
+
 void gui_init(void){
     if(!fb_is_enabled()){fb_enable();if(!fb_is_enabled())return;}
     if(!g_desktop_cache) g_desktop_cache = (u32*)heap_malloc(fb_get_width() * fb_get_height() * 4);

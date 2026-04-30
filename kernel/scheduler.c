@@ -32,8 +32,23 @@ typedef struct {
 
 extern void null_isr(void);
 extern void timer_isr(void);
-extern void isr_errcode(void);
+extern void isr_errcode(void);       /* fallback alias — avoid using directly */
 extern void isr_page_fault(void);
+
+/* Per-vector panic stubs — push exact vector number then full dump */
+extern void panic_stub_0(void);    /* #DE no-ec */
+extern void panic_stub_6(void);    /* #UD no-ec */
+extern void panic_stub_7(void);    /* #NM no-ec */
+extern void panic_stub_8(void);    /* #DF  ec */
+extern void panic_stub_10(void);   /* #TS  ec */
+extern void panic_stub_11(void);   /* #NP  ec */
+extern void panic_stub_12(void);   /* #SS  ec */
+extern void panic_stub_13(void);   /* #GP  ec */
+extern void panic_stub_14(void);   /* #PF  ec  (also used as isr_page_fault fallthrough) */
+extern void panic_stub_17(void);   /* #AC  ec */
+extern void panic_stub_21(void);   /* #CP  ec */
+extern void panic_stub_29(void);   /* #VC  ec */
+extern void panic_stub_30(void);   /* #SX  ec */
 
 static void idt_set(IDTGate *idt, int vec, void (*handler)(void)) {
     u64 addr = (u64)handler;
@@ -51,16 +66,22 @@ static void idt_init(void) {
     for (int i = 0; i < IDT_ENTRIES; i++) idt_set(idt, i, null_isr);
     idt_set(idt, 0x20, timer_isr);
 
-    idt_set(idt, 8,  isr_errcode);
-    idt_set(idt, 10, isr_errcode);
-    idt_set(idt, 11, isr_errcode);
-    idt_set(idt, 12, isr_errcode);
-    idt_set(idt, 13, isr_errcode);
-    idt_set(idt, 14, isr_page_fault); /* #PF: demand paging + CoW */
-    idt_set(idt, 17, isr_errcode);
-    idt_set(idt, 21, isr_errcode);
-    idt_set(idt, 29, isr_errcode);
-    idt_set(idt, 30, isr_errcode);
+    /* No-error-code fault stubs */
+    idt_set(idt, 0,  panic_stub_0);   /* #DE divide-by-zero */
+    idt_set(idt, 6,  panic_stub_6);   /* #UD invalid opcode */
+    idt_set(idt, 7,  panic_stub_7);   /* #NM device not available */
+
+    /* Error-code fault stubs — each pushes its vector then dumps */
+    idt_set(idt, 8,  panic_stub_8);   /* #DF double fault  */
+    idt_set(idt, 10, panic_stub_10);  /* #TS invalid TSS   */
+    idt_set(idt, 11, panic_stub_11);  /* #NP seg not present */
+    idt_set(idt, 12, panic_stub_12);  /* #SS stack-seg fault */
+    idt_set(idt, 13, panic_stub_13);  /* #GP general protection */
+    idt_set(idt, 14, isr_page_fault); /* #PF: demand paging + CoW (falls to panic_stub_14 on unhandled) */
+    idt_set(idt, 17, panic_stub_17);  /* #AC alignment check */
+    idt_set(idt, 21, panic_stub_21);  /* #CP control protection */
+    idt_set(idt, 29, panic_stub_29);  /* #VC VMM communication */
+    idt_set(idt, 30, panic_stub_30);  /* #SX security exception */
 }
 
 static void pic_init(void) {

@@ -56,85 +56,377 @@ null_isr:
 #    [RSP+32]  RSP_user  (only present if CPL changed)
 #    [RSP+40]  SS_user   (only present if CPL changed)
 # ================================================================
+# ================================================================
+#  isr_errcode — now just an alias for panic_stub with vec=0xFF
+#  (Should not be called directly anymore; use per-vector stubs.)
+#  Kept for backward-compat in case something jumps here.
+#  We push ec=0 then vec=0xFF and fall through.
+# ================================================================
 .globl isr_errcode
 isr_errcode:
+    push 0          # dummy error code (caller didn't push one)
+    push 0xFF       # sentinel vector
+    jmp  .panic_common
+
+# ================================================================
+#  Per-vector panic stubs.
+#  Vectors with CPU-pushed error code: 8,10,11,12,13,14,17,21,29,30
+#  All others: we push 0 as error code first.
+# ================================================================
+.globl panic_stub_0,  panic_stub_6,  panic_stub_7
+.globl panic_stub_8,  panic_stub_10, panic_stub_11, panic_stub_12
+.globl panic_stub_13, panic_stub_14, panic_stub_17, panic_stub_21
+.globl panic_stub_29, panic_stub_30
+
+panic_stub_0:   push 0;   push 0;  jmp  .panic_common   # #DE (no ec)
+panic_stub_6:   push 0;   push 6;  jmp  .panic_common   # #UD (no ec)
+panic_stub_7:   push 0;   push 7;  jmp  .panic_common   # #NM (no ec)
+panic_stub_8:             push 8;  jmp  .panic_common   # #DF (has ec)
+panic_stub_10:            push 10; jmp  .panic_common   # #TS
+panic_stub_11:            push 11; jmp  .panic_common   # #NP
+panic_stub_12:            push 12; jmp  .panic_common   # #SS
+panic_stub_13:            push 13; jmp  .panic_common   # #GP
+panic_stub_14:            push 14; jmp  .panic_common   # #PF
+panic_stub_17:            push 17; jmp  .panic_common   # #AC
+panic_stub_21:            push 21; jmp  .panic_common   # #CP
+panic_stub_29:            push 29; jmp  .panic_common   # #VC
+panic_stub_30:            push 30; jmp  .panic_common   # #SX
+
+# ================================================================
+#  .panic_common — full panic dump
+#
+#  Stack on entry:
+#    [RSP+ 0]  vector number  (we just pushed)
+#    [RSP+ 8]  error code     (CPU or we pushed)
+#    [RSP+16]  RIP
+#    [RSP+24]  CS
+#    [RSP+32]  RFLAGS
+#    [RSP+40]  RSP_user
+#    [RSP+48]  SS_user
+# ================================================================
+.panic_common:
     cli
+
+    # Save all 15 GP regs (120 bytes)
     push rax
     push rbx
     push rcx
     push rdx
     push rsi
     push rdi
-    # After 6 pushes (48 bytes), exception frame is at:
-    #   error code @ [rsp+48], RIP @ [rsp+56]
-    mov  rbx, [rsp + 48]      # error code
-    mov  rcx, [rsp + 56]      # faulting RIP
-    mov  rdx, cr2             # fault address (#PF)
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
 
-    mov  rdi, 0xB8000         # VGA framebuffer base
+    # GP regs on stack (rsp-relative, after 15 pushes):
+    #  +0=r15 +8=r14 +16=r13 +24=r12 +32=r11 +40=r10 +48=r9  +56=r8
+    #  +64=rbp +72=rdi +80=rsi +88=rdx +96=rcx +104=rbx +112=rax
+    # Exception frame:
+    #  +120=vec +128=ec +136=RIP +144=CS +152=RFLAGS +160=RSP +168=SS
 
-    # Print "FAULT ec=" (9 chars)
-    lea  rsi, [rip + .fe_label]
-    mov  rax, 9
-.fe_lp: movzx ebx, byte ptr [rsi]
-    mov  [rdi], bl;  mov  byte ptr [rdi+1], 0x4F
-    add  rsi, 1;  add  rdi, 2;  dec  rax;  jnz  .fe_lp
+    # Stash everything we need in .bss scratch area before we touch r8-r15
+    mov  rax, [rsp + 120]; mov [rip + .pv_vec],    rax   # vector
+    mov  rax, [rsp + 128]; mov [rip + .pv_ec],     rax   # error code
+    mov  rax, [rsp + 136]; mov [rip + .pv_rip],    rax   # RIP
+    mov  rax, [rsp + 144]; mov [rip + .pv_cs],     rax   # CS
+    mov  rax, [rsp + 152]; mov [rip + .pv_rflags], rax   # RFLAGS
+    mov  rax, [rsp + 160]; mov [rip + .pv_rsp],    rax   # user RSP
+    mov  rax, [rsp + 168]; mov [rip + .pv_ss],     rax   # SS
+    mov  rax, cr2;         mov [rip + .pv_cr2],    rax
+    mov  rax, cr3;         mov [rip + .pv_cr3],    rax
+    mov  rax, [rip + current_pid];  mov [rip + .pv_pid],   rax
+    mov  rax, [rip + pit_ticks];    mov [rip + .pv_ticks], rax
 
-    # Print error code — 4 hex digits
-    mov  rax, [rsp + 48]
-    mov  rax, rbx             # restore rbx = error code
-    mov  rbx, [rsp + 48]
-    call .print_hex4
+    # ── Clear screen ─────────────────────────────────────────────
+    mov  rdi, 0xB8000
+    mov  rcx, 80*25
+    mov  eax, 0x0720        # space, grey on black
+.pv_clr:
+    mov  [rdi], ax; add rdi, 2; dec rcx; jnz .pv_clr
 
-    # Print " rip=" (5 chars)
-    lea  rsi, [rip + .rip_lbl]
-    mov  rax, 5
-.rl_lp: movzx ebx, byte ptr [rsi]
-    mov  [rdi], bl;  mov  byte ptr [rdi+1], 0x4F
-    add  rsi, 1;  add  rdi, 2;  dec  rax;  jnz  .rl_lp
+    # ── Row 0: banner ─────────────────────────────────────────────
+    # "KERNEL PANIC  vec=XX (NAME)"  attr 0x4F
+    mov  rdi, 0xB8000
+    mov  r15b, 0x4F
+    lea  rsi, [rip + .pv_str_banner]; call .pv_puts
+    mov  rbx, [rip + .pv_vec];        call .pv_dec8
+    mov  al, ' '; call .pv_putc
+    mov  al, '('; call .pv_putc
+    # look up vector name (16-byte slots)
+    mov  rax, [rip + .pv_vec]
+    cmp  rax, 31; jle .pv_goodvec
+    mov  rax, 31   # clamp
+.pv_goodvec:
+    imul rax, rax, 16
+    lea  rsi, [rip + .pv_vec_names]
+    add  rsi, rax
+    call .pv_puts
+    mov  al, ')'; call .pv_putc
 
-    # Print RIP — 16 hex digits
-    mov  rbx, rcx             # rcx = faulting RIP
-    call .print_hex16
+    # ── Row 1: RIP CS RFLAGS [decoded] ───────────────────────────
+    mov  rdi, 0xB8000 + (1*80*2)
+    mov  r15b, 0x1F
+    lea  rsi,[rip+.pv_s_rip];    call .pv_puts
+    mov  rbx,[rip+.pv_rip];      call .pv_hex16
+    lea  rsi,[rip+.pv_s_cs];     call .pv_puts
+    mov  rbx,[rip+.pv_cs];       call .pv_hex4
+    lea  rsi,[rip+.pv_s_fl];     call .pv_puts
+    mov  rbx,[rip+.pv_rflags];   call .pv_hex8
+    # decode flags
+    mov  al,' '; call .pv_putc; mov al,'['; call .pv_putc
+    mov  rax, [rip + .pv_rflags]
+    # CF PF AF ZF SF IF DF OF
+    lea  rsi, [rip + .pv_flagbits]
+    lea  rcx, [rip + .pv_flagchrs]
+    mov  r8, 8
+.pv_fl_lp:
+    movzx rbx, byte ptr [rsi]
+    bt   rax, rbx
+    jnc  .pv_fl_skip
+    movzx rbx, byte ptr [rcx]
+    mov  [rdi], bl; mov byte ptr [rdi+1], r15b; add rdi, 2
+.pv_fl_skip:
+    inc rsi; inc rcx; dec r8; jnz .pv_fl_lp
+    mov al,']'; call .pv_putc
 
-    # Print " cr2=" (5 chars)
-    lea  rsi, [rip + .cr2_lbl]
-    mov  rax, 5
-.cl_lp: movzx ebx, byte ptr [rsi]
-    mov  [rdi], bl;  mov  byte ptr [rdi+1], 0x4F
-    add  rsi, 1;  add  rdi, 2;  dec  rax;  jnz  .cl_lp
+    # ── Row 2: SS RSP EC [decode] CR2 ────────────────────────────
+    mov  rdi, 0xB8000 + (2*80*2)
+    mov  r15b, 0x1F
+    lea  rsi,[rip+.pv_s_ss];   call .pv_puts
+    mov  rbx,[rip+.pv_ss];     call .pv_hex4
+    lea  rsi,[rip+.pv_s_rsp];  call .pv_puts
+    mov  rbx,[rip+.pv_rsp];    call .pv_hex16
+    lea  rsi,[rip+.pv_s_ec];   call .pv_puts
+    mov  rbx,[rip+.pv_ec];     call .pv_hex4
+    # #PF error code decode
+    mov  r9, [rip + .pv_vec]
+    cmp  r9, 14; jne .pv_no_pf_decode
+    mov  rax,[rip+.pv_ec]
+    mov  al,' '; call .pv_putc; mov al,'['; call .pv_putc
+    bt   rax,0; jnc .pv_br_np;  lea rsi,[rip+.pv_ec_p];  jmp .pv_ec_p0
+.pv_br_np:                       lea rsi,[rip+.pv_ec_np]
+.pv_ec_p0: call .pv_puts
+    bt   rax,1; jnc .pv_br_r;  lea rsi,[rip+.pv_ec_w];  jmp .pv_ec_w0
+.pv_br_r:                       lea rsi,[rip+.pv_ec_r]
+.pv_ec_w0: call .pv_puts
+    bt   rax,2; jnc .pv_br_k;  lea rsi,[rip+.pv_ec_u];  jmp .pv_ec_u0
+.pv_br_k:                       lea rsi,[rip+.pv_ec_k]
+.pv_ec_u0: call .pv_puts
+    bt   rax,3; jnc .pv_no_rsvd; lea rsi,[rip+.pv_ec_rsvd]; call .pv_puts
+.pv_no_rsvd:
+    bt   rax,4; jnc .pv_no_id;   lea rsi,[rip+.pv_ec_id];   call .pv_puts
+.pv_no_id:
+    mov  al,']'; call .pv_putc
+.pv_no_pf_decode:
+    lea  rsi,[rip+.pv_s_cr2];  call .pv_puts
+    mov  rbx,[rip+.pv_cr2];    call .pv_hex16
 
-    # Print CR2 — 16 hex digits
-    mov  rbx, rdx             # rdx = cr2
-    call .print_hex16
+    # ── Row 3: CR3 PID TICKS ─────────────────────────────────────
+    mov  rdi, 0xB8000 + (3*80*2)
+    mov  r15b, 0x1F
+    lea  rsi,[rip+.pv_s_cr3];   call .pv_puts
+    mov  rbx,[rip+.pv_cr3];     call .pv_hex16
+    lea  rsi,[rip+.pv_s_pid];   call .pv_puts
+    mov  rbx,[rip+.pv_pid];     call .pv_hex4
+    lea  rsi,[rip+.pv_s_ticks]; call .pv_puts
+    mov  rbx,[rip+.pv_ticks];   call .pv_hex16
 
-.isr_hlt:
-    hlt
-    jmp  .isr_hlt
+    # ── Rows 4-7: GP registers ───────────────────────────────────
+    # Stack: +112=rax +104=rbx +96=rcx +88=rdx +80=rsi +72=rdi
+    #        +64=rbp  +56=r8   +48=r9  +40=r10 +32=r11 +24=r12
+    #        +16=r13  +8=r14   +0=r15
+    mov  rdi, 0xB8000 + (4*80*2); mov r15b, 0x1F
+    lea  rsi,[rip+.pv_s_rax]; call .pv_puts; mov rbx,[rsp+112]; call .pv_hex16
+    lea  rsi,[rip+.pv_s_rbx]; call .pv_puts; mov rbx,[rsp+104]; call .pv_hex16
+    lea  rsi,[rip+.pv_s_rcx]; call .pv_puts; mov rbx,[rsp+ 96]; call .pv_hex16
+    lea  rsi,[rip+.pv_s_rdx]; call .pv_puts; mov rbx,[rsp+ 88]; call .pv_hex16
 
-# ── helpers (local, called with call — rdi = VGA cursor) ─────────
-.print_hex4:                  # print low 16 bits of rbx as 4 hex digits
-    mov  rax, rbx
-    shl  rax, 48              # shift interesting nibbles to top
-    mov  rcx, 4
-    jmp  .hex_loop
-.print_hex16:                 # print rbx as 16 hex digits
-    mov  rax, rbx
-    mov  rcx, 16
-.hex_loop:
-    rol  rax, 4
-    mov  rbx, rax
-    and  rbx, 0xF
-    lea  rsi, [rip + .hx]
-    movzx ebx, byte ptr [rsi + rbx]
-    mov  [rdi], bl;  mov  byte ptr [rdi+1], 0x4F
-    add  rdi, 2;  dec  rcx;  jnz  .hex_loop
-    ret
+    mov  rdi, 0xB8000 + (5*80*2)
+    lea  rsi,[rip+.pv_s_rsi]; call .pv_puts; mov rbx,[rsp+ 80]; call .pv_hex16
+    lea  rsi,[rip+.pv_s_rdi]; call .pv_puts; mov rbx,[rsp+ 72]; call .pv_hex16
+    lea  rsi,[rip+.pv_s_rbp]; call .pv_puts; mov rbx,[rsp+ 64]; call .pv_hex16
+    lea  rsi,[rip+.pv_s_r8];  call .pv_puts; mov rbx,[rsp+ 56]; call .pv_hex16
 
-.fe_label:  .ascii "FAULT ec="
-.rip_lbl:   .ascii " rip="
-.cr2_lbl:   .ascii " cr2="
-.hx:        .ascii "0123456789abcdef"
+    mov  rdi, 0xB8000 + (6*80*2)
+    lea  rsi,[rip+.pv_s_r9];  call .pv_puts; mov rbx,[rsp+ 48]; call .pv_hex16
+    lea  rsi,[rip+.pv_s_r10]; call .pv_puts; mov rbx,[rsp+ 40]; call .pv_hex16
+    lea  rsi,[rip+.pv_s_r11]; call .pv_puts; mov rbx,[rsp+ 32]; call .pv_hex16
+    lea  rsi,[rip+.pv_s_r12]; call .pv_puts; mov rbx,[rsp+ 24]; call .pv_hex16
+
+    mov  rdi, 0xB8000 + (7*80*2)
+    lea  rsi,[rip+.pv_s_r13]; call .pv_puts; mov rbx,[rsp+ 16]; call .pv_hex16
+    lea  rsi,[rip+.pv_s_r14]; call .pv_puts; mov rbx,[rsp+  8]; call .pv_hex16
+    lea  rsi,[rip+.pv_s_r15]; call .pv_puts; mov rbx,[rsp+  0]; call .pv_hex16
+
+    # ── Row 8: stack dump header ──────────────────────────────────
+    mov  rdi, 0xB8000 + (8*80*2); mov r15b, 0x4F
+    lea  rsi,[rip+.pv_s_stk]; call .pv_puts
+
+    # ── Rows 9-12: 4 rows × 4 qwords from RSP_user ───────────────
+    mov  rbp, [rip + .pv_rsp]   # start address
+    mov  r13, 9                  # VGA row counter
+    mov  r14, 4                  # row count
+.pv_sdump:
+    mov  rax, r13; imul rax, rax, 160; add rax, 0xB8000
+    mov  rdi, rax; mov r15b, 0x2F
+
+    lea  rsi,[rip+.pv_s_at]; call .pv_puts
+    mov  rbx, rbp;            call .pv_hex16
+    mov  al,':'; call .pv_putc; mov al,' '; call .pv_putc
+
+    mov  r12, 4
+.pv_sdcell:
+    cmp  rbp, 0x1000
+    jl   .pv_sdbad
+    mov  rbx, [rbp]; jmp .pv_sdok
+.pv_sdbad: mov rbx, 0xBADBADBADBADBADB
+.pv_sdok:
+    call .pv_hex16; mov al,' '; call .pv_putc
+    add  rbp, 8; dec r12; jnz .pv_sdcell
+    inc  r13; dec r14; jnz .pv_sdump
+
+.pv_halt:
+    hlt; jmp .pv_halt
+
+# ── Helpers ─────────────────────────────────────────────────────
+.pv_puts:
+    push rax
+.pv_puts_l:
+    movzx eax, byte ptr [rsi]; test al,al; jz .pv_puts_e
+    mov [rdi],al; mov byte ptr [rdi+1],r15b; add rdi,2; inc rsi; jmp .pv_puts_l
+.pv_puts_e: pop rax; ret
+
+.pv_putc:
+    mov [rdi],al; mov byte ptr [rdi+1],r15b; add rdi,2; ret
+
+.pv_hex16:
+    push rax; push rcx
+    mov rax,rbx; mov rcx,16
+.pv_h16l: rol rax,4; push rax; and rax,0xF
+    lea rbx,[rip+.pv_hx]; movzx eax,byte ptr [rbx+rax]
+    mov [rdi],al; mov byte ptr [rdi+1],r15b; add rdi,2
+    pop rax; dec rcx; jnz .pv_h16l
+    pop rcx; pop rax; ret
+
+.pv_hex8:
+    push rax; push rcx
+    mov rax,rbx; shl rax,32; mov rcx,8; jmp .pv_h16l
+
+.pv_hex4:
+    push rax; push rcx
+    mov rax,rbx; shl rax,48; mov rcx,4; jmp .pv_h16l
+
+.pv_dec8:   # print rbx as decimal (up to 3 digits)
+    push rax; push rbx; push rcx; push rdx
+    mov rax,rbx; xor rdx,rdx; mov rcx,100; div rcx
+    test rax,rax; jz .pv_d_skip_h
+    add al,'0'; mov [rdi],al; mov byte ptr [rdi+1],r15b; add rdi,2
+.pv_d_skip_h:
+    mov rax,rdx; xor rdx,rdx; mov rcx,10; div rcx
+    test rax,rax; jz .pv_d_skip_t
+    add al,'0'; mov [rdi],al; mov byte ptr [rdi+1],r15b; add rdi,2
+.pv_d_skip_t:
+    add dl,'0'; mov [rdi],dl; mov byte ptr [rdi+1],r15b; add rdi,2
+    pop rdx; pop rcx; pop rbx; pop rax; ret
+
+# ── Data ────────────────────────────────────────────────────────
+.align 8
+.pv_vec:    .quad 0
+.pv_ec:     .quad 0
+.pv_rip:    .quad 0
+.pv_cs:     .quad 0
+.pv_rflags: .quad 0
+.pv_rsp:    .quad 0
+.pv_ss:     .quad 0
+.pv_cr2:    .quad 0
+.pv_cr3:    .quad 0
+.pv_pid:    .quad 0
+.pv_ticks:  .quad 0
+
+.pv_hx:     .ascii "0123456789abcdef"
+
+.pv_str_banner: .asciz "KERNEL PANIC  vec="
+.pv_s_rip:      .asciz "RIP="
+.pv_s_cs:       .asciz " CS="
+.pv_s_fl:       .asciz " FL="
+.pv_s_ss:       .asciz "SS="
+.pv_s_rsp:      .asciz " RSP="
+.pv_s_ec:       .asciz " EC="
+.pv_s_cr2:      .asciz " CR2="
+.pv_s_cr3:      .asciz "CR3="
+.pv_s_pid:      .asciz " PID="
+.pv_s_ticks:    .asciz " TICKS="
+.pv_s_rax:      .asciz "RAX="
+.pv_s_rbx:      .asciz " RBX="
+.pv_s_rcx:      .asciz " RCX="
+.pv_s_rdx:      .asciz " RDX="
+.pv_s_rsi:      .asciz "RSI="
+.pv_s_rdi:      .asciz " RDI="
+.pv_s_rbp:      .asciz " RBP="
+.pv_s_r8:       .asciz " R8="
+.pv_s_r9:       .asciz "R9="
+.pv_s_r10:      .asciz "  R10="
+.pv_s_r11:      .asciz " R11="
+.pv_s_r12:      .asciz " R12="
+.pv_s_r13:      .asciz "R13="
+.pv_s_r14:      .asciz " R14="
+.pv_s_r15:      .asciz " R15="
+.pv_s_stk:      .asciz "Stack dump (RSP_user):"
+.pv_s_at:       .asciz "  "
+
+.pv_flagbits: .byte 0,2,4,6,7,9,10,11   # CF PF AF ZF SF IF DF OF
+.pv_flagchrs: .ascii "CPAZSIDo"
+
+.pv_ec_p:    .asciz "P"
+.pv_ec_np:   .asciz "NP"
+.pv_ec_w:    .asciz "W"
+.pv_ec_r:    .asciz "R"
+.pv_ec_u:    .asciz "U"
+.pv_ec_k:    .asciz "K"
+.pv_ec_rsvd: .asciz "RSVD"
+.pv_ec_id:   .asciz "ID"
+
+# 32 vector names, 16 bytes each (null-padded to exactly 16)
+.pv_vec_names:
+    .ascii "#DE div0\0       "   # 0  (pad to 16)
+    .ascii "#DB debug\0      "   # 1
+    .ascii "#NMI\0           "   # 2
+    .ascii "#BP breakpt\0    "   # 3
+    .ascii "#OF overflow\0   "   # 4
+    .ascii "#BR bound\0      "   # 5
+    .ascii "#UD bad opcode\0 "   # 6
+    .ascii "#NM no FPU\0     "   # 7
+    .ascii "#DF dbl fault\0  "   # 8
+    .ascii "#coproc seg\0    "   # 9
+    .ascii "#TS bad TSS\0    "   # 10
+    .ascii "#NP !present\0   "   # 11
+    .ascii "#SS stack\0      "   # 12
+    .ascii "#GP gen prot\0   "   # 13
+    .ascii "#PF page fault\0 "   # 14
+    .ascii "#reserved\0      "   # 15
+    .ascii "#MF x87\0        "   # 16
+    .ascii "#AC align\0      "   # 17
+    .ascii "#MC machine\0    "   # 18
+    .ascii "#XF SIMD\0       "   # 19
+    .ascii "#VE virt\0       "   # 20
+    .ascii "#CP ctrl prot\0  "   # 21
+    .ascii "#reserved\0      "   # 22
+    .ascii "#reserved\0      "   # 23
+    .ascii "#reserved\0      "   # 24
+    .ascii "#reserved\0      "   # 25
+    .ascii "#reserved\0      "   # 26
+    .ascii "#reserved\0      "   # 27
+    .ascii "#HV hypervisor\0 "   # 28
+    .ascii "#VC VMM comm\0   "   # 29
+    .ascii "#SX security\0   "   # 30
+    .ascii "#reserved\0      "   # 31
+
 
 # ================================================================
 #  isr_page_fault — vector 14 (#PF) handler with demand-paging/CoW
@@ -208,7 +500,8 @@ isr_page_fault:
     pop  rax
     # Stack now: [error_code][RIP][CS][RFLAGS][RSP][SS]
     # Jump into isr_errcode which expects exactly this layout
-    jmp  isr_errcode
+    push 14           # vector #PF
+    jmp  .panic_common
 
 # ================================================================
 #  timer_isr — Bug 1 re-fix
@@ -237,6 +530,9 @@ timer_isr:
 
     # ── Watchdog tick ─────────────────────────────────────────────
     call watchdog_tick
+
+    # ── Software cursor blink ─────────────────────────────────────
+    call cursor_blink_tick
 
     # ── Find RUNNING process ──────────────────────────────────────
     mov  rbx, PROC_TABLE
@@ -610,6 +906,7 @@ kernel_return_rsp:  .quad 0
 .extern sys_snd_opl_write, sys_snd_opl_note, sys_snd_opl_reset
 .extern sys_snd_mix_play, sys_snd_mix_stop, sys_snd_mix_volume, sys_snd_mix_tick
 .extern watchdog_tick
+.extern cursor_blink_tick
 .extern vmm_destroy, heap_free
 .extern sys_pipe, sys_socket, sys_bind, sys_connect, sys_listen, sys_accept
 .extern sys_send, sys_recv, sys_close_socket
