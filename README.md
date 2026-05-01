@@ -1,7 +1,8 @@
 # Systrix OS — Deep Reference Manual
 
 > x86-64 microkernel written in C and AT&T assembly.  
-> Boots from a raw MBR disk image, runs ELF64 user-space binaries, has a GUI, networking, audio, two browsers, and its own scripting language.
+> Boots from a raw MBR disk image, runs ELF64 user-space binaries, has a GUI, networking, audio and a lynx browser
+> 
 
 ---
 
