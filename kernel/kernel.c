@@ -1,5 +1,5 @@
 /* ================================================================
- *  SHADOW OS — kernel/kernel.c
+ *   — kernel/kernel.c
  *  VGA terminal, ATA PIO driver, FAT32 filesystem, VFS layer,
  *  keyboard driver, interactive shell, and kernel_main().
  * ================================================================ */
