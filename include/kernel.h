@@ -573,15 +573,21 @@ int   fb_get_height(void);
 void  usb_hid_init(void);     /* legacy stub — superseded by usb_full_init */
 void  usb_hid_poll(void);     /* legacy stub */
 
-/* kernel/usb.c — full USB stack (EHCI + XHCI + mass storage) */
+/* kernel/usb.c — full USB stack (EHCI + XHCI + mass storage + CDC + printer) */
 void  usb_full_init(void);    /* call after pci_scan_all */
 void  usb_full_poll(void);    /* call from event/idle loop */
 void  usb_list_devices(void); /* lsusb shell command helper */
+/* USB Mass Storage (BBB/SCSI) */
 int   usb_msc_read(int dev_idx, u64 lba, u32 count, void *buf);
 int   usb_msc_write(int dev_idx, u64 lba, u32 count, void *buf);
 int   usb_msc_count(void);
 u64   usb_msc_block_count(int idx);
 u32   usb_msc_block_size(int idx);
+/* USB CDC (serial/ACM) */
+int   usb_cdc_read(int dev_idx, void *buf, u16 len);
+int   usb_cdc_write(int dev_idx, const void *buf, u16 len);
+/* USB Printer class */
+int   usb_printer_write(int dev_idx, const void *buf, u32 len);
 int   fb_get_bpp(void);
 u8   *fb_get_ptr(void);
 u64   fb_get_phys(void);

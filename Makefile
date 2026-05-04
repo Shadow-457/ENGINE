@@ -152,7 +152,20 @@ NIC  = -netdev user,id=net0 -device e1000,netdev=net0,mac=52:54:00:12:34:56
 DISP = -device bochs-display,xres=1024,yres=768
 # USB keyboard + mouse (supplements PS/2)
 USBHID = # PS/2 keyboard+mouse used — GUI polls port 0x60/0x64 directly
+
+# USB: xHCI controller + emulated flash drive for testing usb_full_init()
+# NOTE: xhci more stable than ehci in QEMU; 64M image avoids FAT32 cluster warning
+USB_TEST = -device qemu-xhci,id=xhci0 \
+           -drive if=none,id=usbstick,file=usb_test.img,format=raw \
+           -device usb-storage,bus=xhci0.0,drive=usbstick
 AUDIO = -device sb16,audiodev=snd0 -audiodev sdl,id=snd0
+
+usb_test.img:
+	dd if=/dev/zero of=usb_test.img bs=1M count=64 status=none
+	mkfs.fat -F 32 -n USBTEST usb_test.img
+	echo "USB TEST FILE" > /tmp/usbtest.txt
+	MTOOLS_SKIP_CHECK=1 mcopy -i usb_test.img /tmp/usbtest.txt ::/USBTEST.TXT
+	@echo "Created usb_test.img (16M FAT32 flash drive image)"
 
 run: systrix.img
 	$(QEMU) -drive format=raw,file=systrix.img,if=ide \
@@ -161,6 +174,15 @@ run: systrix.img
 	        $(DISP) $(USBHID) \
 	        $(NIC) \
 	        $(AUDIO)
+
+run-usb: systrix.img usb_test.img
+	$(QEMU) -drive format=raw,file=systrix.img,if=ide \
+	        -m 512M -no-reboot \
+	        -machine pc,accel=tcg \
+	        $(DISP) $(USBHID) \
+	        $(NIC) \
+	        $(AUDIO) \
+	        $(USB_TEST)
 
 run-quiet: systrix.img
 	$(QEMU) -drive format=raw,file=systrix.img,if=ide \

@@ -461,6 +461,7 @@ static void ehci_init_one(u8 bus, u8 sl, u8 fn) {
     e->dummy_qh->epcap   = (1u << 30);
     e->dummy_qh->next_qtd = QTD_TERMINATE;
     e->dummy_qh->alt_qtd  = QTD_TERMINATE;
+    e->dummy_qh->token   = (1u << 6); /* Halted bit — tells HC this QH has no work */
 
     /* Allocate periodic frame list (1024 entries, all T-bit set = empty) */
     u64 flist_phys;
@@ -1353,6 +1354,1152 @@ static void x2_init_one(u8 bus, u8 sl, u8 fn) {
 }
 
 /* ================================================================
+ *  §8  UHCI HOST CONTROLLER (USB 1.1 — prog-if 0x00)
+ *
+ *  UHCI uses I/O ports (not MMIO), a Frame List of 1024 u32
+ *  pointers, and Queue Heads + Transfer Descriptors to move data.
+ *  Each port runs at full-speed (12 Mbit/s) or low-speed (1.5 Mbit/s).
+ * ================================================================ */
+
+/* UHCI I/O register offsets */
+#define UHCI_USBCMD     0x00   /* 16-bit */
+#define UHCI_USBSTS     0x02   /* 16-bit */
+#define UHCI_USBINTR    0x04   /* 16-bit */
+#define UHCI_FRNUM      0x06   /* 16-bit */
+#define UHCI_FLBASEADD  0x08   /* 32-bit */
+#define UHCI_SOF        0x0C   /* 8-bit  */
+#define UHCI_PORTSC(n)  (0x10 + (n)*2)   /* 16-bit */
+
+/* USBCMD bits */
+#define UHCI_CMD_RS     (1<<0)
+#define UHCI_CMD_HCRST  (1<<1)
+#define UHCI_CMD_GRST   (1<<2)
+#define UHCI_CMD_EGSM   (1<<3)
+#define UHCI_CMD_FGR    (1<<4)
+#define UHCI_CMD_SWDBG  (1<<5)
+#define UHCI_CMD_CF     (1<<6)
+#define UHCI_CMD_MAXP   (1<<7)
+
+/* USBSTS bits */
+#define UHCI_STS_USBINT  (1<<0)
+#define UHCI_STS_ERR     (1<<1)
+#define UHCI_STS_RD      (1<<2)
+#define UHCI_STS_HSE     (1<<3)
+#define UHCI_STS_HCPE    (1<<4)
+#define UHCI_STS_HCH     (1<<5)
+
+/* PORTSC bits */
+#define UHCI_PORT_CCS    (1<<0)   /* current connect status */
+#define UHCI_PORT_CSC    (1<<1)   /* connect status change */
+#define UHCI_PORT_PED    (1<<2)   /* port enable */
+#define UHCI_PORT_PEDC   (1<<3)   /* port enable change */
+#define UHCI_PORT_LS     (1<<4)   /* line status D- */
+#define UHCI_PORT_RD     (1<<6)   /* resume detect */
+#define UHCI_PORT_LSDA   (1<<8)   /* low speed device attached */
+#define UHCI_PORT_PR     (1<<9)   /* port reset */
+#define UHCI_PORT_SUSP   (1<<12)
+
+/* UHCI Transfer Descriptor (16-byte aligned) */
+typedef struct __attribute__((packed, aligned(16))) {
+    u32 link;       /* next TD/QH link (bit0=T, bit1=QH, bit2=depth) */
+    u32 status;     /* actual length [10:0], status [31:16] */
+    u32 token;      /* PID, address, endpoint, data toggle, max len */
+    u32 buf;        /* buffer pointer (32-bit phys) */
+} UhciTD;
+
+/* UHCI Queue Head */
+typedef struct __attribute__((packed, aligned(16))) {
+    u32 link;       /* horizontal link (next QH) */
+    u32 elem;       /* element (first TD) */
+} UhciQH;
+
+#define UHCI_TD_STS_ACTIVE  (1<<23)
+#define UHCI_TD_STS_STALL   (1<<22)
+#define UHCI_TD_STS_BABBLE  (1<<20)
+#define UHCI_TD_STS_NAK     (1<<19)
+#define UHCI_TD_STS_CRCERR  (1<<18)
+#define UHCI_TD_STS_BITSTUFF (1<<17)
+#define UHCI_TD_STS_LS      (1<<26)   /* low-speed device */
+#define UHCI_TD_STS_IOS     (1<<25)   /* isochronous select */
+#define UHCI_TD_STS_IOC     (1<<24)   /* interrupt on complete */
+#define UHCI_TD_ACTLEN(td)  ((td)->status & 0x7FF)
+
+/* PID tokens */
+#define UHCI_PID_SETUP  0x2D
+#define UHCI_PID_IN     0x69
+#define UHCI_PID_OUT    0xE1
+
+/* TD token helpers: pack pid, devaddr, ep, toggle, maxlen */
+#define UHCI_MK_TOKEN(pid,addr,ep,tog,mxl) \
+    ((u32)(pid) | ((u32)(addr)<<8) | ((u32)(ep)<<15) | \
+     ((u32)(tog)<<19) | (((u32)(mxl)-1)<<21))
+
+#define UHCI_MAX 2
+typedef struct {
+    u16  iobase;
+    u32 *frame_list;    /* 1024 u32, 4K-aligned */
+    u64  fl_phys;
+    UhciQH *qh_async;  /* single async QH for control/bulk */
+    u64  qh_phys;
+    u8   n_ports;
+    u8   next_addr;
+    int  active;
+    int  index;
+} Uhci;
+
+static Uhci g_uhci[UHCI_MAX];
+static int  g_n_uhci = 0;
+
+static inline u16 uhci_inw(Uhci *u, u32 off) {
+    u16 v; __asm__ volatile("inw %1,%0":"=a"(v):"d"((u16)(u->iobase+off))); return v;
+}
+static inline void uhci_outw(Uhci *u, u32 off, u16 v) {
+    __asm__ volatile("outw %0,%1"::"a"(v),"d"((u16)(u->iobase+off)));
+}
+static inline u32 uhci_inl(Uhci *u, u32 off) {
+    u32 v; __asm__ volatile("inl %1,%0":"=a"(v):"d"((u16)(u->iobase+off))); return v;
+}
+static inline void uhci_outl(Uhci *u, u32 off, u32 v) {
+    __asm__ volatile("outl %0,%1"::"a"(v),"d"((u16)(u->iobase+off)));
+}
+
+static void uhci_delay(int us) { ehci_delay(us); }
+
+/* Execute a control transfer (SETUP + optional DATA + STATUS) via UHCI */
+static int uhci_ctrl_xfer(Uhci *u, u8 addr, u8 ls,
+                           u8 bmReqType, u8 bReq, u16 wVal, u16 wIdx,
+                           u16 wLen, void *data)
+{
+    /* Allocate DMA buffers */
+    u64 setup_phys, data_phys = 0, stat_phys;
+    u8 *setup_buf = (u8*)dma_alloc_aligned(8, 8, &setup_phys);
+    u8 *stat_buf  = (u8*)dma_alloc_aligned(4, 4, &stat_phys);
+    if (!setup_buf || !stat_buf) return -1;
+
+    setup_buf[0] = bmReqType; setup_buf[1] = bReq;
+    setup_buf[2] = (u8)wVal;  setup_buf[3] = (u8)(wVal>>8);
+    setup_buf[4] = (u8)wIdx;  setup_buf[5] = (u8)(wIdx>>8);
+    setup_buf[6] = (u8)wLen;  setup_buf[7] = (u8)(wLen>>8);
+
+    if (wLen && data) {
+        u8 *db = (u8*)dma_alloc_aligned(wLen, 4, &data_phys);
+        if (!db) return -1;
+        if (!(bmReqType & 0x80)) memcpy(db, data, wLen);
+    }
+
+    /* Build TDs: SETUP + DATA (optional) + STATUS */
+    int n_td = 2 + (wLen ? 1 : 0);
+    u64 td_phys;
+    UhciTD *tds = (UhciTD*)dma_alloc_aligned(n_td * sizeof(UhciTD), 16, &td_phys);
+    if (!tds) return -1;
+    memset(tds, 0, n_td * sizeof(UhciTD));
+
+    u32 ls_bit = ls ? UHCI_TD_STS_LS : 0;
+
+    /* SETUP TD */
+    int i = 0;
+    tds[i].link   = (u32)(td_phys + sizeof(UhciTD)) | 0x4; /* depth-first */
+    tds[i].status = UHCI_TD_STS_ACTIVE | ls_bit | (3<<27); /* 3 errors */
+    tds[i].token  = UHCI_MK_TOKEN(UHCI_PID_SETUP, addr, 0, 0, 8);
+    tds[i].buf    = (u32)setup_phys;
+    i++;
+
+    /* DATA TD */
+    if (wLen && data) {
+        int is_in = (bmReqType & 0x80) ? 1 : 0;
+        tds[i].link   = (u32)(td_phys + (i+1)*sizeof(UhciTD)) | 0x4;
+        tds[i].status = UHCI_TD_STS_ACTIVE | ls_bit | (3<<27);
+        tds[i].token  = UHCI_MK_TOKEN(is_in ? UHCI_PID_IN : UHCI_PID_OUT,
+                                       addr, 0, 1, wLen);
+        tds[i].buf    = (u32)data_phys;
+        i++;
+    }
+
+    /* STATUS TD (opposite direction, toggle=1) */
+    int stat_pid = (bmReqType & 0x80) ? UHCI_PID_OUT : UHCI_PID_IN;
+    tds[i].link   = 0x1; /* terminate */
+    tds[i].status = UHCI_TD_STS_ACTIVE | ls_bit | (3<<27);
+    tds[i].token  = UHCI_MK_TOKEN(stat_pid, addr, 0, 1, 0);
+    tds[i].buf    = (u32)stat_phys;
+
+    /* Insert TDs into the async QH */
+    u->qh_async->elem = (u32)td_phys | 0; /* TD pointer */
+
+    /* Wait for completion (poll all TDs) */
+    int ok = 0;
+    for (int t = 100000; t--; ) {
+        uhci_delay(10);
+        int done = 1;
+        for (int j = 0; j <= i; j++) {
+            if (tds[j].status & UHCI_TD_STS_ACTIVE) { done = 0; break; }
+        }
+        if (done) { ok = 1; break; }
+    }
+
+    /* Dequeue */
+    u->qh_async->elem = 0x1; /* terminate */
+
+    /* Copy IN data */
+    if (ok && wLen && data && (bmReqType & 0x80)) {
+        u8 *db = (u8*)(usize)data_phys; /* identity mapped */
+        memcpy(data, db, wLen);
+    }
+
+    return ok ? 0 : -1;
+}
+
+static int uhci_port_reset(Uhci *u, int port) {
+    u16 ps = uhci_inw(u, UHCI_PORTSC(port));
+    if (!(ps & UHCI_PORT_CCS)) return -1;
+
+    /* Assert reset for 50 ms */
+    uhci_outw(u, UHCI_PORTSC(port), (u16)(ps | UHCI_PORT_PR));
+    uhci_delay(50000);
+    uhci_outw(u, UHCI_PORTSC(port), (u16)(ps & ~UHCI_PORT_PR));
+    uhci_delay(10000);
+
+    /* Enable port */
+    ps = uhci_inw(u, UHCI_PORTSC(port));
+    uhci_outw(u, UHCI_PORTSC(port), (u16)(ps | UHCI_PORT_PED));
+    uhci_delay(5000);
+
+    ps = uhci_inw(u, UHCI_PORTSC(port));
+    if (!(ps & UHCI_PORT_PED)) return -1;
+    return (ps & UHCI_PORT_LSDA) ? 1 : 0; /* 0=FS 1=LS */
+}
+
+static void uhci_scan_ports(Uhci *u);
+
+static void uhci_init_one(u8 bus, u8 sl, u8 fn) {
+    if (g_n_uhci >= UHCI_MAX) return;
+    Uhci *u = &g_uhci[g_n_uhci];
+    memset(u, 0, sizeof(*u));
+    u->index = g_n_uhci;
+
+    /* BAR4 = I/O base for UHCI */
+    u32 bar4 = pci_read32(bus, sl, fn, 0x20);
+    if (!(bar4 & 1)) return; /* must be I/O */
+    u->iobase = (u16)(bar4 & 0xFFFC);
+
+    /* Enable bus master + I/O */
+    u32 cmd = pci_read32(bus, sl, fn, 0x04);
+    pci_write32(bus, sl, fn, 0x04, cmd | 0x05);
+
+    /* Global reset */
+    uhci_outw(u, UHCI_USBCMD, UHCI_CMD_GRST);
+    uhci_delay(12000);
+    uhci_outw(u, UHCI_USBCMD, 0);
+    uhci_delay(3000);
+
+    /* Host controller reset */
+    uhci_outw(u, UHCI_USBCMD, UHCI_CMD_HCRST);
+    for (int t = 100; t-- && (uhci_inw(u, UHCI_USBCMD) & UHCI_CMD_HCRST); )
+        uhci_delay(1000);
+
+    /* Allocate 1024-entry frame list (4K-aligned) */
+    u->frame_list = (u32*)dma_alloc_aligned(4096, 4096, &u->fl_phys);
+    if (!u->frame_list) return;
+    /* Allocate async QH */
+    u->qh_async = (UhciQH*)dma_alloc_aligned(16, 16, &u->qh_phys);
+    if (!u->qh_async) return;
+    u->qh_async->link = 0x1; /* terminate */
+    u->qh_async->elem = 0x1; /* terminate */
+
+    /* Point all frame list entries to the async QH */
+    for (int i = 0; i < 1024; i++)
+        u->frame_list[i] = (u32)u->qh_phys | 0x2; /* QH pointer */
+
+    /* Program frame list base */
+    uhci_outl(u, UHCI_FLBASEADD, (u32)u->fl_phys);
+    uhci_outw(u, UHCI_FRNUM, 0);
+    uhci_outw(u, UHCI_USBINTR, 0); /* no interrupts */
+    uhci_outw(u, UHCI_USBCMD, UHCI_CMD_RS | UHCI_CMD_CF | UHCI_CMD_MAXP);
+    uhci_delay(5000);
+
+    /* Count ports (test until PORTSC reads 0xFFFF) */
+    u->n_ports = 0;
+    for (int p = 0; p < 8; p++) {
+        u16 ps = uhci_inw(u, UHCI_PORTSC(p));
+        if (ps == 0xFFFF || !(ps & (1<<7))) break;
+        u->n_ports++;
+    }
+    u->next_addr = 1;
+    u->active = 1;
+    g_n_uhci++;
+
+    print_str("[UHCI] init OK iobase=");
+    print_hex_byte((u8)(u->iobase >> 8));
+    print_hex_byte((u8)(u->iobase));
+    print_str(" ports=");
+    print_hex_byte(u->n_ports);
+    print_str("\r\n");
+
+    uhci_scan_ports(u);
+}
+
+static void uhci_scan_ports(Uhci *u) {
+    for (int p = 0; p < u->n_ports; p++) {
+        u16 ps = uhci_inw(u, UHCI_PORTSC(p));
+        if (!(ps & UHCI_PORT_CCS)) continue;
+        /* Clear change bits */
+        uhci_outw(u, UHCI_PORTSC(p), (u16)(ps | UHCI_PORT_CSC | UHCI_PORT_PEDC));
+
+        int ls = uhci_port_reset(u, p);
+        if (ls < 0) continue;
+
+        int pre = g_n_usb_dev;
+        usb_enumerate_device(2 /*UHCI*/, u->index, (u8)(ls ? 1 : 0));
+        if (g_n_usb_dev > pre)
+            probe_msc(&g_usb_dev[g_n_usb_dev - 1], g_n_usb_dev - 1);
+    }
+}
+
+/* ================================================================
+ *  §9  OHCI HOST CONTROLLER (USB 1.1 — prog-if 0x10)
+ *
+ *  OHCI uses MMIO and a Hcca (Host Controller Communications Area)
+ *  with Endpoint Descriptors (ED) and Transfer Descriptors (TD).
+ *  It supports full-speed and low-speed devices.
+ * ================================================================ */
+
+/* OHCI operational register offsets */
+#define OHCI_REVISION       0x00
+#define OHCI_CONTROL        0x04
+#define OHCI_CMDSTATUS      0x08
+#define OHCI_INTRSTATUS     0x0C
+#define OHCI_INTRENABLE     0x10
+#define OHCI_INTRDISABLE    0x14
+#define OHCI_HCCA           0x18
+#define OHCI_PERIOD_CURED   0x1C
+#define OHCI_CTRL_HEAD_ED   0x20
+#define OHCI_CTRL_CUR_ED    0x24
+#define OHCI_BULK_HEAD_ED   0x28
+#define OHCI_BULK_CUR_ED    0x2C
+#define OHCI_DONE_HEAD      0x30
+#define OHCI_FMINTERVAL     0x34
+#define OHCI_FMREMAINING    0x38
+#define OHCI_FMNUMBER       0x3C
+#define OHCI_PERIODICSTART  0x40
+#define OHCI_LSTHRESH       0x44
+#define OHCI_RH_DESCA       0x48
+#define OHCI_RH_DESCB       0x4C
+#define OHCI_RH_STATUS      0x50
+#define OHCI_RH_PORTSTAT(n) (0x54 + (n)*4)
+
+/* OHCI_CONTROL bits */
+#define OHCI_CTRL_CBSR      0x3
+#define OHCI_CTRL_PLE       (1<<2)
+#define OHCI_CTRL_IE        (1<<3)
+#define OHCI_CTRL_CLE       (1<<4)
+#define OHCI_CTRL_BLE       (1<<5)
+#define OHCI_CTRL_HCFS(x)   (((x)&3)<<6)   /* 00=reset 01=resume 10=operational 11=suspend */
+#define OHCI_CTRL_IR        (1<<8)
+#define OHCI_CTRL_RWC       (1<<9)
+#define OHCI_CTRL_RWE       (1<<10)
+#define OHCI_USB_OPER       2
+
+/* OHCI_CMDSTATUS bits */
+#define OHCI_CMD_HCR        (1<<0)
+#define OHCI_CMD_CLF        (1<<1)
+#define OHCI_CMD_BLF        (1<<2)
+#define OHCI_CMD_OCR        (1<<3)
+
+/* OHCI RH port status bits */
+#define OHCI_PORT_CCS       (1<<0)
+#define OHCI_PORT_PES       (1<<1)
+#define OHCI_PORT_PSS       (1<<2)
+#define OHCI_PORT_POCI      (1<<3)
+#define OHCI_PORT_PRS       (1<<4)
+#define OHCI_PORT_PPS       (1<<8)
+#define OHCI_PORT_LSDA      (1<<9)
+#define OHCI_PORT_CSC       (1<<16)
+#define OHCI_PORT_PESC      (1<<17)
+#define OHCI_PORT_PSSC      (1<<18)
+#define OHCI_PORT_OCIC      (1<<19)
+#define OHCI_PORT_PRSC      (1<<20)
+
+/* OHCI HCCA — 256-byte aligned */
+typedef struct __attribute__((packed, aligned(256))) {
+    u32 int_table[32]; /* periodic ED table */
+    u16 frame_no;
+    u16 pad1;
+    u32 done_head;
+    u8  reserved[116];
+} OhciHcca;
+
+/* OHCI Endpoint Descriptor */
+typedef struct __attribute__((packed, aligned(16))) {
+    u32 ctrl;       /* FA[6:0], EN[10:7], D[12:11], S[13], K[14], F[15], MPS[26:16] */
+    u32 tail_td;    /* tail TD pointer */
+    u32 head_td;    /* head TD pointer (halted bit at bit0) */
+    u32 next_ed;    /* next ED in list */
+} OhciED;
+
+/* OHCI Transfer Descriptor */
+typedef struct __attribute__((packed, aligned(16))) {
+    u32 ctrl;       /* cbp direction, rounding, delay, toggle, EC, CC */
+    u32 cbp;        /* current buffer pointer */
+    u32 next_td;    /* next TD */
+    u32 be;         /* buffer end */
+} OhciTD;
+
+#define OHCI_TD_CC(td)   ((td)->ctrl >> 28)
+#define OHCI_TD_CC_OK    0
+#define OHCI_TD_DP_SETUP 0
+#define OHCI_TD_DP_OUT   1
+#define OHCI_TD_DP_IN    2
+#define OHCI_TD_ROUNDING (1<<18)
+#define OHCI_TD_DI(n)    ((n)<<21)   /* delay interrupt */
+#define OHCI_TD_DT(t)    ((t)<<24)   /* data toggle */
+#define OHCI_TD_DT_AUTO  0
+#define OHCI_ED_SKIP     (1<<14)
+
+#define OHCI_MAX 2
+typedef struct {
+    u8       *mmio;
+    OhciHcca *hcca;
+    u64       hcca_phys;
+    OhciED   *ctrl_ed;
+    u64       ctrl_ed_phys;
+    u8        n_ports;
+    u8        next_addr;
+    int       active;
+    int       index;
+} Ohci;
+
+static Ohci g_ohci[OHCI_MAX];
+static int  g_n_ohci = 0;
+
+static inline u32 ohci_r(Ohci *o, u32 off) {
+    return *(volatile u32*)(o->mmio + off);
+}
+static inline void ohci_w(Ohci *o, u32 off, u32 v) {
+    *(volatile u32*)(o->mmio + off) = v;
+}
+
+static int ohci_ctrl_xfer(Ohci *o, u8 addr, u8 ls,
+                           u8 bmReqType, u8 bReq, u16 wVal, u16 wIdx,
+                           u16 wLen, void *data)
+{
+    u64 setup_phys, data_phys = 0, stat_phys, td_phys, ed_phys;
+    u8 *setup_buf = (u8*)dma_alloc_aligned(8, 8, &setup_phys);
+    u8 *stat_buf  = (u8*)dma_alloc_aligned(4, 4, &stat_phys);
+    if (!setup_buf || !stat_buf) return -1;
+
+    setup_buf[0] = bmReqType; setup_buf[1] = bReq;
+    setup_buf[2] = (u8)wVal;  setup_buf[3] = (u8)(wVal>>8);
+    setup_buf[4] = (u8)wIdx;  setup_buf[5] = (u8)(wIdx>>8);
+    setup_buf[6] = (u8)wLen;  setup_buf[7] = (u8)(wLen>>8);
+
+    u8 *data_buf = NULL;
+    if (wLen && data) {
+        data_buf = (u8*)dma_alloc_aligned(wLen, 4, &data_phys);
+        if (!data_buf) return -1;
+        if (!(bmReqType & 0x80)) memcpy(data_buf, data, wLen);
+    }
+
+    /* Allocate TDs: setup, [data,] status, null-terminator */
+    int n_td = 3 + (wLen ? 1 : 0);
+    OhciTD *tds = (OhciTD*)dma_alloc_aligned(n_td * sizeof(OhciTD), 16, &td_phys);
+    if (!tds) return -1;
+    memset(tds, 0, n_td * sizeof(OhciTD));
+
+    /* SETUP TD */
+    int i = 0;
+    tds[i].ctrl   = (OHCI_TD_DP_SETUP << 19) | OHCI_TD_ROUNDING |
+                    OHCI_TD_DI(6) | (0xFu<<28); /* CC=not accessed */
+    tds[i].cbp    = (u32)setup_phys;
+    tds[i].next_td = (u32)(td_phys + (i+1)*sizeof(OhciTD));
+    tds[i].be     = (u32)setup_phys + 7;
+    i++;
+
+    /* DATA TD */
+    if (wLen && data_buf) {
+        int dp = (bmReqType & 0x80) ? OHCI_TD_DP_IN : OHCI_TD_DP_OUT;
+        tds[i].ctrl   = ((u32)dp << 19) | OHCI_TD_ROUNDING |
+                        OHCI_TD_DI(6) | OHCI_TD_DT(3) | (0xFu<<28);
+        tds[i].cbp    = (u32)data_phys;
+        tds[i].next_td = (u32)(td_phys + (i+1)*sizeof(OhciTD));
+        tds[i].be     = (u32)data_phys + wLen - 1;
+        i++;
+    }
+
+    /* STATUS TD */
+    int sdp = (bmReqType & 0x80) ? OHCI_TD_DP_OUT : OHCI_TD_DP_IN;
+    tds[i].ctrl   = ((u32)sdp << 19) | OHCI_TD_ROUNDING |
+                    OHCI_TD_DI(6) | OHCI_TD_DT(3) | (0xFu<<28);
+    tds[i].cbp    = 0;
+    tds[i].next_td = (u32)(td_phys + (i+1)*sizeof(OhciTD)); /* null TD */
+    tds[i].be     = 0;
+    i++;
+    /* Null/tail TD */
+    tds[i].ctrl = 0; tds[i].cbp = 0; tds[i].next_td = 0; tds[i].be = 0;
+
+    /* Build ED for this transfer */
+    OhciED *ed = (OhciED*)dma_alloc_aligned(sizeof(OhciED), 16, &ed_phys);
+    if (!ed) return -1;
+    u32 mps = ls ? 8 : 64;
+    ed->ctrl    = (u32)addr | (0u<<7) | (ls ? (1u<<13) : 0) | (mps<<16);
+    ed->tail_td = (u32)(td_phys + i*sizeof(OhciTD));
+    ed->head_td = (u32)td_phys;
+    ed->next_ed = 0;
+
+    /* Insert into control list */
+    ohci_w(o, OHCI_CTRL_HEAD_ED, (u32)ed_phys);
+    ohci_w(o, OHCI_CMDSTATUS, OHCI_CMD_CLF); /* ring control list filled */
+
+    /* Wait */
+    int ok = 0;
+    for (int t = 200000; t--; ) {
+        ehci_delay(5);
+        if (tds[0].ctrl >> 28 != 0xF &&
+            tds[1 + (wLen?1:0)].ctrl >> 28 != 0xF) { ok = 1; break; }
+    }
+
+    ohci_w(o, OHCI_CTRL_HEAD_ED, 0);
+    if (ok && wLen && data_buf && (bmReqType & 0x80))
+        memcpy(data, data_buf, wLen);
+    return ok ? 0 : -1;
+}
+
+static int ohci_port_reset(Ohci *o, int port) {
+    u32 ps = ohci_r(o, OHCI_RH_PORTSTAT(port));
+    if (!(ps & OHCI_PORT_CCS)) return -1;
+    /* Power on */
+    ohci_w(o, OHCI_RH_PORTSTAT(port), OHCI_PORT_PPS);
+    ehci_delay(20000);
+    /* Reset */
+    ohci_w(o, OHCI_RH_PORTSTAT(port), OHCI_PORT_PRS);
+    for (int t = 500; t-- && (ohci_r(o, OHCI_RH_PORTSTAT(port)) & OHCI_PORT_PRS); )
+        ehci_delay(1000);
+    ps = ohci_r(o, OHCI_RH_PORTSTAT(port));
+    if (!(ps & OHCI_PORT_PES)) return -1;
+    return (ps & OHCI_PORT_LSDA) ? 1 : 0;
+}
+
+static void ohci_scan_ports(Ohci *o);
+
+static void ohci_init_one(u8 bus, u8 sl, u8 fn) {
+    if (g_n_ohci >= OHCI_MAX) return;
+    Ohci *o = &g_ohci[g_n_ohci];
+    memset(o, 0, sizeof(*o));
+    o->index = g_n_ohci;
+
+    /* BAR0 = MMIO */
+    u32 bar0 = pci_read32(bus, sl, fn, 0x10) & ~0xFu;
+    if (!bar0) return;
+    u64 mmio_va = 0xCB000000ULL + (u64)g_n_ohci * 0x2000ULL;
+    vmm_map(mmio_va, (u64)bar0, 0x1000, 0);
+    o->mmio = (u8*)mmio_va;
+
+    /* Enable bus master + memory */
+    u32 cmd = pci_read32(bus, sl, fn, 0x04);
+    pci_write32(bus, sl, fn, 0x04, cmd | 0x06);
+
+    /* BIOS handoff (SMM → OS) */
+    u32 ctrl = ohci_r(o, OHCI_CONTROL);
+    if (ctrl & OHCI_CTRL_IR) {
+        ohci_w(o, OHCI_CMDSTATUS, OHCI_CMD_OCR);
+        for (int t = 100; t-- && (ohci_r(o, OHCI_CONTROL) & OHCI_CTRL_IR); )
+            ehci_delay(1000);
+    }
+
+    /* Reset */
+    ohci_w(o, OHCI_CMDSTATUS, OHCI_CMD_HCR);
+    for (int t = 100; t-- && (ohci_r(o, OHCI_CMDSTATUS) & OHCI_CMD_HCR); )
+        ehci_delay(100);
+
+    /* Allocate HCCA */
+    o->hcca = (OhciHcca*)dma_alloc_aligned(sizeof(OhciHcca), 256, &o->hcca_phys);
+    if (!o->hcca) return;
+    memset(o->hcca, 0, sizeof(OhciHcca));
+    ohci_w(o, OHCI_HCCA, (u32)o->hcca_phys);
+
+    /* Frame interval */
+    ohci_w(o, OHCI_FMINTERVAL, 0xA7782EDF);
+    ohci_w(o, OHCI_PERIODICSTART, 0x2A2F);
+
+    /* Enable control list, set operational */
+    ohci_w(o, OHCI_CONTROL,
+           OHCI_CTRL_HCFS(OHCI_USB_OPER) | OHCI_CTRL_CLE | OHCI_CTRL_BLE);
+    ehci_delay(5000);
+
+    /* Port count from RH_DESCA */
+    o->n_ports = (u8)(ohci_r(o, OHCI_RH_DESCA) & 0xFF);
+    o->next_addr = 1;
+    o->active = 1;
+    g_n_ohci++;
+
+    print_str("[OHCI] init OK ports=");
+    print_hex_byte(o->n_ports);
+    print_str("\r\n");
+
+    ohci_scan_ports(o);
+}
+
+static void ohci_scan_ports(Ohci *o) {
+    for (int p = 0; p < o->n_ports; p++) {
+        u32 ps = ohci_r(o, OHCI_RH_PORTSTAT(p));
+        if (!(ps & OHCI_PORT_CCS)) continue;
+
+        int ls = ohci_port_reset(o, p);
+        if (ls < 0) continue;
+
+        int pre = g_n_usb_dev;
+        usb_enumerate_device(3 /*OHCI*/, o->index, (u8)(ls ? 1 : 0));
+        if (g_n_usb_dev > pre)
+            probe_msc(&g_usb_dev[g_n_usb_dev - 1], g_n_usb_dev - 1);
+
+        /* Clear change bits */
+        ohci_w(o, OHCI_RH_PORTSTAT(p), OHCI_PORT_CSC | OHCI_PORT_PESC);
+    }
+}
+
+/* ================================================================
+ *  §10  USB HUB CLASS (class 0x09)
+ *
+ *  A USB hub presents one upstream port and 1–7 downstream ports.
+ *  We enumerate each downstream port as a new USB device, supporting
+ *  cascaded hubs up to depth 2.
+ * ================================================================ */
+
+#define USB_CLASS_HUB        0x09
+#define HUB_REQ_GET_DESCRIPTOR 0x06
+#define HUB_DESC_TYPE        0x29
+#define HUB_REQ_GET_STATUS   0x00
+#define HUB_REQ_SET_FEATURE  0x03
+#define HUB_REQ_CLEAR_FEATURE 0x01
+#define HUB_FEAT_PORT_POWER  8
+#define HUB_FEAT_PORT_RESET  4
+#define HUB_FEAT_PORT_CONN_CHANGE  16
+#define HUB_FEAT_PORT_RESET_CHANGE 20
+#define HUB_PORT_CCS         (1<<0)
+#define HUB_PORT_PES         (1<<1)
+#define HUB_PORT_LSDA        (1<<9)
+
+typedef struct __attribute__((packed)) {
+    u8  bLength, bDescriptorType;
+    u8  bNbrPorts;
+    u16 wHubCharacteristics;
+    u8  bPwrOn2PwrGood;
+    u8  bHubContrCurrent;
+    u8  DeviceRemovable[4];
+} UsbHubDesc;
+
+static void probe_hub(UsbDevice *dev, int dev_idx) {
+    if (dev->class_code != USB_CLASS_HUB) return;
+
+    /* GET_DESCRIPTOR(Hub, type 0x29) */
+    UsbHubDesc hd;
+    memset(&hd, 0, sizeof(hd));
+    int rc = usb_ctrl_xfer(dev->ctrlr_type, dev->address,
+                           0xA0, HUB_REQ_GET_DESCRIPTOR,
+                           (HUB_DESC_TYPE << 8), 0, sizeof(hd), &hd);
+    if (rc) return;
+    if (!hd.bNbrPorts || hd.bNbrPorts > 16) return;
+
+    print_str("[USB-HUB] addr=");
+    print_hex_byte(dev->address);
+    print_str(" ports=");
+    print_hex_byte(hd.bNbrPorts);
+    print_str("\r\n");
+
+    /* Power all ports */
+    for (int p = 1; p <= hd.bNbrPorts; p++) {
+        usb_ctrl_xfer(dev->ctrlr_type, dev->address,
+                      0x23, HUB_REQ_SET_FEATURE,
+                      HUB_FEAT_PORT_POWER, p, 0, 0);
+    }
+    ehci_delay((int)(hd.bPwrOn2PwrGood) * 2 * 1000);
+
+    /* Enumerate each port */
+    for (int p = 1; p <= hd.bNbrPorts; p++) {
+        /* GET_STATUS for port */
+        u32 ps = 0;
+        rc = usb_ctrl_xfer(dev->ctrlr_type, dev->address,
+                           0xA3, HUB_REQ_GET_STATUS, 0, p, 4, &ps);
+        if (rc || !(ps & HUB_PORT_CCS)) continue;
+
+        /* Reset port */
+        usb_ctrl_xfer(dev->ctrlr_type, dev->address,
+                      0x23, HUB_REQ_SET_FEATURE, HUB_FEAT_PORT_RESET, p, 0, 0);
+        ehci_delay(60000);
+
+        /* Wait for reset completion */
+        for (int t = 20; t--; ) {
+            ps = 0;
+            usb_ctrl_xfer(dev->ctrlr_type, dev->address,
+                          0xA3, HUB_REQ_GET_STATUS, 0, p, 4, &ps);
+            if (ps & HUB_FEAT_PORT_RESET_CHANGE) break;
+            ehci_delay(5000);
+        }
+
+        /* Clear reset change */
+        usb_ctrl_xfer(dev->ctrlr_type, dev->address,
+                      0x23, HUB_REQ_CLEAR_FEATURE,
+                      HUB_FEAT_PORT_RESET_CHANGE, p, 0, 0);
+
+        if (!(ps & HUB_PORT_PES)) continue;
+
+        u8 speed = (ps & HUB_PORT_LSDA) ? 1 : 0;
+        int pre = g_n_usb_dev;
+        usb_enumerate_device(dev->ctrlr_type, dev->ctrlr_idx, speed);
+        if (g_n_usb_dev > pre) {
+            int ni = g_n_usb_dev - 1;
+            probe_msc(&g_usb_dev[ni], ni);
+            /* Note: recursive hub probing is skipped to avoid stack overflow */
+        }
+    }
+}
+
+/* ================================================================
+ *  §11  USB AUDIO CLASS (class 0x01, subclass 0x01/0x02/0x03)
+ *
+ *  We perform minimal enumeration: detect the device, log it, and
+ *  bind it to SystrixOS's sound subsystem if present. Full audio
+ *  streaming (isochronous transfers) requires ISO endpoint support
+ *  which is outside the scope of the polled EHCI driver; we register
+ *  the device so userspace tools can identify it.
+ * ================================================================ */
+
+#define USB_CLASS_AUDIO      0x01
+#define USB_SUBCLASS_AUDIO_CTRL  0x01
+#define USB_SUBCLASS_AUDIO_STREAM 0x02
+#define USB_SUBCLASS_AUDIO_MIDI  0x03
+
+#define USB_AUDIO_MAX 4
+typedef struct {
+    UsbDevice *dev;
+    int  dev_idx;
+    u8   subclass;   /* 1=AudioControl 2=AudioStreaming 3=MIDI */
+    int  valid;
+} UsbAudio;
+
+static UsbAudio g_usb_audio[USB_AUDIO_MAX];
+static int      g_n_usb_audio = 0;
+
+static void probe_audio(UsbDevice *dev, int dev_idx) {
+    if (dev->class_code != USB_CLASS_AUDIO) return;
+    if (g_n_usb_audio >= USB_AUDIO_MAX) return;
+
+    UsbAudio *a = &g_usb_audio[g_n_usb_audio];
+    a->dev     = dev;
+    a->dev_idx = dev_idx;
+    a->subclass = dev->subclass;
+    a->valid   = 1;
+    g_n_usb_audio++;
+
+    const char *type = "audio";
+    if (dev->subclass == USB_SUBCLASS_AUDIO_MIDI) type = "MIDI";
+    else if (dev->subclass == USB_SUBCLASS_AUDIO_STREAM) type = "stream";
+
+    print_str("[USB-AUDIO] ");
+    print_str(type);
+    print_str(" addr=");
+    print_hex_byte(dev->address);
+    print_str("\r\n");
+}
+
+/* ================================================================
+ *  §12  USB CDC / SERIAL (class 0x02 ACM modem, 0x0A CDC data)
+ *
+ *  Covers USB-to-serial adapters (e.g. CP210x, CH340, FTDI clones
+ *  that declare CDC ACM), and generic CDC-ECM/NCM network adapters.
+ *  We configure the line coding (115200 8N1) and expose the device
+ *  as a character stream via usb_cdc_read() / usb_cdc_write().
+ * ================================================================ */
+
+#define USB_CLASS_CDC        0x02
+#define USB_CLASS_CDC_DATA   0x0A
+#define USB_SUBCLASS_ACM     0x02
+#define USB_SUBCLASS_ECM     0x06
+#define USB_SUBCLASS_NCM     0x0D
+
+/* CDC ACM requests */
+#define CDC_SET_LINE_CODING     0x20
+#define CDC_GET_LINE_CODING     0x21
+#define CDC_SET_CTRL_LINE_STATE 0x22
+
+typedef struct __attribute__((packed)) {
+    u32 dwDTERate;    /* baud rate */
+    u8  bCharFormat;  /* 0=1stop 1=1.5stop 2=2stop */
+    u8  bParityType;  /* 0=none 1=odd 2=even 3=mark 4=space */
+    u8  bDataBits;    /* 5,6,7,8,16 */
+} CdcLineCoding;
+
+#define USB_CDC_MAX 4
+typedef struct {
+    UsbDevice *dev;
+    int  dev_idx;
+    u8   subclass;
+    int  valid;
+} UsbCdc;
+
+static UsbCdc g_usb_cdc[USB_CDC_MAX];
+static int    g_n_usb_cdc = 0;
+
+static void probe_cdc(UsbDevice *dev, int dev_idx) {
+    if (dev->class_code != USB_CLASS_CDC &&
+        dev->class_code != USB_CLASS_CDC_DATA) return;
+    if (g_n_usb_cdc >= USB_CDC_MAX) return;
+
+    UsbCdc *c = &g_usb_cdc[g_n_usb_cdc];
+    c->dev     = dev;
+    c->dev_idx = dev_idx;
+    c->subclass = dev->subclass;
+    c->valid   = 1;
+
+    /* For ACM: set line coding to 115200 8N1 */
+    if (dev->subclass == USB_SUBCLASS_ACM) {
+        CdcLineCoding lc = { 115200, 0, 0, 8 };
+        usb_ctrl_xfer(dev->ctrlr_type, dev->address,
+                      0x21, CDC_SET_LINE_CODING, 0, 0, sizeof(lc), &lc);
+        /* RTS + DTR asserted */
+        usb_ctrl_xfer(dev->ctrlr_type, dev->address,
+                      0x21, CDC_SET_CTRL_LINE_STATE, 0x03, 0, 0, 0);
+    }
+
+    g_n_usb_cdc++;
+
+    const char *sub = (dev->subclass == USB_SUBCLASS_ACM) ? "ACM"  :
+                      (dev->subclass == USB_SUBCLASS_ECM) ? "ECM"  :
+                      (dev->subclass == USB_SUBCLASS_NCM) ? "NCM"  : "CDC";
+    print_str("[USB-CDC/");
+    print_str(sub);
+    print_str("] addr=");
+    print_hex_byte(dev->address);
+    print_str("\r\n");
+}
+
+/* Bulk read from CDC data interface */
+int usb_cdc_read(int dev_idx, void *buf, u16 len) {
+    if (dev_idx < 0 || dev_idx >= g_n_usb_cdc) return -1;
+    UsbCdc *c = &g_usb_cdc[dev_idx];
+    if (!c->valid) return -1;
+    UsbDevice *dev = c->dev;
+    if (!dev->ep_in) return -1;
+    if (dev->ctrlr_type != 0) return -1; /* EHCI only for now */
+    for (int i = 0; i < g_n_ehci; i++) {
+        if (g_ehci[i].active && g_ehci[i].index == dev->ctrlr_idx)
+            return ehci_bulk_xfer(&g_ehci[i], dev->address, dev->ep_in | 0x80,
+                                  1, buf, len, &dev->msc_toggle_in);
+    }
+    return -1;
+}
+
+/* Bulk write to CDC data interface */
+int usb_cdc_write(int dev_idx, const void *buf, u16 len) {
+    if (dev_idx < 0 || dev_idx >= g_n_usb_cdc) return -1;
+    UsbCdc *c = &g_usb_cdc[dev_idx];
+    if (!c->valid) return -1;
+    UsbDevice *dev = c->dev;
+    if (!dev->ep_out) return -1;
+    if (dev->ctrlr_type != 0) return -1;
+    for (int i = 0; i < g_n_ehci; i++) {
+        if (g_ehci[i].active && g_ehci[i].index == dev->ctrlr_idx)
+            return ehci_bulk_xfer(&g_ehci[i], dev->address, dev->ep_out,
+                                  0, (void*)buf, len, &dev->msc_toggle_out);
+    }
+    return -1;
+}
+
+/* ================================================================
+ *  §13  USB PRINTER CLASS (class 0x07)
+ *
+ *  USB printer class uses a Bulk-OUT endpoint for data and optionally
+ *  a Bulk-IN for status. We implement GET_DEVICE_ID to read the
+ *  printer's IEEE 1284 device ID string, and usb_printer_write()
+ *  to submit raw print data (PCL / PostScript / ESC/P).
+ * ================================================================ */
+
+#define USB_CLASS_PRINTER    0x07
+#define PRINTER_REQ_GET_DEVICE_ID  0x00
+#define PRINTER_REQ_GET_PORT_STATUS 0x01
+#define PRINTER_REQ_SOFT_RESET     0x02
+
+#define USB_PRINTER_MAX 2
+typedef struct {
+    UsbDevice *dev;
+    int  dev_idx;
+    int  valid;
+} UsbPrinter;
+
+static UsbPrinter g_usb_printer[USB_PRINTER_MAX];
+static int        g_n_usb_printer = 0;
+
+static void probe_printer(UsbDevice *dev, int dev_idx) {
+    if (dev->class_code != USB_CLASS_PRINTER) return;
+    if (g_n_usb_printer >= USB_PRINTER_MAX) return;
+
+    UsbPrinter *p = &g_usb_printer[g_n_usb_printer];
+    p->dev     = dev;
+    p->dev_idx = dev_idx;
+
+    /* GET_DEVICE_ID (bmReqType=0xA1, bReq=0, wVal=0, wIdx=0|iface) */
+    u8 devid[64];
+    memset(devid, 0, sizeof(devid));
+    usb_ctrl_xfer(dev->ctrlr_type, dev->address,
+                  0xA1, PRINTER_REQ_GET_DEVICE_ID, 0, 0, sizeof(devid), devid);
+    /* First two bytes are big-endian length; print truncated */
+    devid[63] = 0;
+    print_str("[USB-PRINTER] addr=");
+    print_hex_byte(dev->address);
+    print_str(" id=");
+    /* Print first 16 chars of ID string */
+    for (int i = 2; i < 18 && devid[i]; i++)
+        vga_putchar(devid[i]);
+    print_str("\r\n");
+
+    p->valid = 1;
+    g_n_usb_printer++;
+}
+
+int usb_printer_write(int dev_idx, const void *buf, u32 len) {
+    if (dev_idx < 0 || dev_idx >= g_n_usb_printer) return -1;
+    UsbPrinter *p = &g_usb_printer[dev_idx];
+    if (!p->valid || !p->dev->ep_out) return -1;
+    UsbDevice *dev = p->dev;
+    if (dev->ctrlr_type != 0) return -1;
+    for (int i = 0; i < g_n_ehci; i++) {
+        if (g_ehci[i].active && g_ehci[i].index == dev->ctrlr_idx)
+            return ehci_bulk_xfer(&g_ehci[i], dev->address, dev->ep_out,
+                                  0, (void*)buf, (u16)len, &dev->msc_toggle_out);
+    }
+    return -1;
+}
+
+/* ================================================================
+ *  §14  USB VIDEO CLASS — UVC (class 0x0E)
+ *
+ *  UVC devices (webcams, capture cards) present a VideoControl
+ *  interface and one or more VideoStreaming interfaces. We enumerate
+ *  the device, probe the VideoStreaming interface for MJPEG or
+ *  uncompressed YUV format descriptors, and log the first supported
+ *  resolution. Actual isochronous capture requires ISO TDs which
+ *  are not yet implemented; we register the device so it can be
+ *  opened later when ISO support is added.
+ * ================================================================ */
+
+#define USB_CLASS_VIDEO      0x0E
+#define USB_SUBCLASS_VIDEO_CTRL   0x01
+#define USB_SUBCLASS_VIDEO_STREAM 0x02
+
+/* UVC VideoControl class-specific request */
+#define UVC_REQ_GET_CUR  0x81
+#define UVC_REQ_SET_CUR  0x01
+
+/* UVC VS interface descriptor subtypes */
+#define UVC_VS_FORMAT_UNCOMPRESSED 0x04
+#define UVC_VS_FORMAT_MJPEG        0x06
+#define UVC_VS_FRAME_UNCOMPRESSED  0x05
+#define UVC_VS_FRAME_MJPEG         0x07
+
+#define USB_VIDEO_MAX 2
+typedef struct {
+    UsbDevice *dev;
+    int  dev_idx;
+    u16  width, height;  /* first detected resolution */
+    u8   format;         /* 4=YUV 6=MJPEG */
+    int  valid;
+} UsbVideo;
+
+static UsbVideo g_usb_video[USB_VIDEO_MAX];
+static int      g_n_usb_video = 0;
+
+static void probe_video(UsbDevice *dev, int dev_idx) {
+    if (dev->class_code != USB_CLASS_VIDEO) return;
+    if (dev->subclass != USB_SUBCLASS_VIDEO_CTRL) return;
+    if (g_n_usb_video >= USB_VIDEO_MAX) return;
+
+    UsbVideo *v = &g_usb_video[g_n_usb_video];
+    v->dev     = dev;
+    v->dev_idx = dev_idx;
+    v->valid   = 1;
+
+    /* Re-fetch full config descriptor and scan for VS frame descriptors */
+    u8 cfg[512];
+    memset(cfg, 0, sizeof(cfg));
+    usb_ctrl_xfer(dev->ctrlr_type, dev->address, 0x80,
+                  USB_REQ_GET_DESCRIPTOR, (USB_DESC_CONFIG << 8), 0, 9, cfg);
+    u16 total = ((UsbConfigDesc*)cfg)->wTotalLength;
+    if (total > 512) total = 512;
+    usb_ctrl_xfer(dev->ctrlr_type, dev->address, 0x80,
+                  USB_REQ_GET_DESCRIPTOR, (USB_DESC_CONFIG << 8), 0, total, cfg);
+
+    u8 *p = cfg, *end = cfg + total;
+    while (p < end && p[0] >= 2) {
+        /* Class-specific interface descriptor (bDescriptorType=0x24) */
+        if (p[1] == 0x24) {
+            u8 subtype = p[2];
+            if ((subtype == UVC_VS_FRAME_UNCOMPRESSED ||
+                 subtype == UVC_VS_FRAME_MJPEG) && p[0] >= 26) {
+                v->format = (subtype == UVC_VS_FRAME_MJPEG) ? 6 : 4;
+                v->width  = (u16)(p[5] | (p[6]<<8));
+                v->height = (u16)(p[7] | (p[8]<<8));
+                break;
+            }
+        }
+        p += p[0];
+    }
+
+    print_str("[USB-VIDEO] addr=");
+    print_hex_byte(dev->address);
+    print_str(" ");
+    print_hex_byte((u8)(v->width >> 8)); print_hex_byte((u8)v->width);
+    print_str("x");
+    print_hex_byte((u8)(v->height >> 8)); print_hex_byte((u8)v->height);
+    print_str(v->format == 6 ? " MJPEG" : " YUV");
+    print_str("\r\n");
+
+    g_n_usb_video++;
+}
+
+/* ================================================================
+ *  §15  USB BLUETOOTH (class 0xE0, subclass 0x01, protocol 0x01)
+ *
+ *  USB Bluetooth dongles follow a simple command channel (EP0 control
+ *  or interrupt OUT) and an event channel (interrupt IN). We send
+ *  HCI Reset to initialise the controller, read the local BD_ADDR,
+ *  and log it. Full HCI/L2CAP/RFCOMM stack is outside scope.
+ * ================================================================ */
+
+#define USB_CLASS_WIRELESS   0xE0
+#define USB_SUBCLASS_BT      0x01
+#define USB_PROTO_BT         0x01
+
+/* HCI packet types (sent over USB) */
+#define HCI_CMD_PKT     0x01
+#define HCI_EVT_PKT     0x04
+
+/* HCI opcodes (OGF<<10 | OCF) */
+#define HCI_RESET        0x0C03
+#define HCI_READ_BD_ADDR 0x1009
+
+#define USB_BT_MAX 2
+typedef struct {
+    UsbDevice *dev;
+    int  dev_idx;
+    u8   bd_addr[6];
+    int  valid;
+} UsbBluetooth;
+
+static UsbBluetooth g_usb_bt[USB_BT_MAX];
+static int          g_n_usb_bt = 0;
+
+/* Send an HCI command via USB control transfer (bmReqType=0x20) */
+static int bt_hci_cmd(UsbDevice *dev, u16 opcode, const u8 *params, u8 plen) {
+    u8 cmd[260];
+    cmd[0] = (u8)opcode;
+    cmd[1] = (u8)(opcode >> 8);
+    cmd[2] = plen;
+    if (plen && params) memcpy(cmd + 3, params, plen);
+    return usb_ctrl_xfer(dev->ctrlr_type, dev->address,
+                         0x20, 0x00, 0, 0, (u16)(3 + plen), cmd);
+}
+
+/* Poll interrupt IN endpoint for an HCI event */
+static int bt_hci_evt(UsbDevice *dev, u8 *buf, u16 maxlen) {
+    if (!dev->ep_in) return -1;
+    if (dev->ctrlr_type != 0) return -1;
+    for (int i = 0; i < g_n_ehci; i++) {
+        if (g_ehci[i].active && g_ehci[i].index == dev->ctrlr_idx)
+            return ehci_bulk_xfer(&g_ehci[i], dev->address, dev->ep_in | 0x80,
+                                  1, buf, maxlen, &dev->msc_toggle_in);
+    }
+    return -1;
+}
+
+static void probe_bluetooth(UsbDevice *dev, int dev_idx) {
+    if (dev->class_code != USB_CLASS_WIRELESS) return;
+    if (dev->subclass   != USB_SUBCLASS_BT)   return;
+    if (dev->protocol   != USB_PROTO_BT)       return;
+    if (g_n_usb_bt >= USB_BT_MAX) return;
+
+    UsbBluetooth *bt = &g_usb_bt[g_n_usb_bt];
+    bt->dev     = dev;
+    bt->dev_idx = dev_idx;
+
+    /* HCI Reset */
+    bt_hci_cmd(dev, HCI_RESET, 0, 0);
+    ehci_delay(200000); /* allow reset to complete */
+
+    /* Read BD_ADDR */
+    bt_hci_cmd(dev, HCI_READ_BD_ADDR, 0, 0);
+    ehci_delay(50000);
+
+    u8 evt[16];
+    memset(evt, 0, sizeof(evt));
+    bt_hci_evt(dev, evt, sizeof(evt));
+    /* HCI command complete event: evt[0]=0x0E, evt[3..4]=opcode, evt[5..10]=BD_ADDR */
+    if (evt[0] == 0x0E && evt[3] == 0x09 && evt[4] == 0x10) {
+        memcpy(bt->bd_addr, &evt[5], 6);
+    }
+
+    bt->valid = 1;
+    g_n_usb_bt++;
+
+    print_str("[USB-BT] addr=");
+    print_hex_byte(dev->address);
+    print_str(" BD=");
+    for (int i = 5; i >= 0; i--) {
+        print_hex_byte(bt->bd_addr[i]);
+        if (i) print_str(":");
+    }
+    print_str("\r\n");
+}
+
+/* ================================================================
+ *  §16  VENDOR-SPECIFIC / UNKNOWN CLASS HANDLER
+ *
+ *  Devices with class 0xFF (vendor-specific) or unrecognised classes
+ *  are logged with their vendor:product IDs and left in the device
+ *  table so tools can query them via usb_list_devices().
+ * ================================================================ */
+
+#define USB_CLASS_VENDOR     0xFF
+
+static void probe_vendor(UsbDevice *dev, int dev_idx) {
+    if (dev->class_code != USB_CLASS_VENDOR) return;
+    print_str("[USB-VENDOR] addr=");
+    print_hex_byte(dev->address);
+    print_str(" sub=");
+    print_hex_byte(dev->subclass);
+    print_str(" proto=");
+    print_hex_byte(dev->protocol);
+    print_str(" (registered, no driver)\r\n");
+    (void)dev_idx;
+}
+
+/* ================================================================
+ *  §17  UNIFIED CLASS PROBE DISPATCHER
+ *
+ *  Called after usb_enumerate_device() places a new entry in
+ *  g_usb_dev[].  Dispatches to the right class driver based on
+ *  bDeviceClass / bInterfaceClass.
+ * ================================================================ */
+static void usb_probe_all_classes(UsbDevice *dev, int dev_idx) {
+    switch (dev->class_code) {
+    case USB_CLASS_MSC:     probe_msc(dev, dev_idx);       break;
+    case USB_CLASS_HUB:     probe_hub(dev, dev_idx);       break;
+    case USB_CLASS_AUDIO:   probe_audio(dev, dev_idx);     break;
+    case USB_CLASS_CDC:
+    case USB_CLASS_CDC_DATA: probe_cdc(dev, dev_idx);      break;
+    case USB_CLASS_PRINTER: probe_printer(dev, dev_idx);   break;
+    case USB_CLASS_VIDEO:   probe_video(dev, dev_idx);     break;
+    case USB_CLASS_WIRELESS: probe_bluetooth(dev, dev_idx); break;
+    case USB_CLASS_VENDOR:  probe_vendor(dev, dev_idx);    break;
+    case USB_CLASS_HID:     /* already handled by XHCI HID path */ break;
+    default:
+        print_str("[USB] unknown class=");
+        print_hex_byte(dev->class_code);
+        print_str(" addr=");
+        print_hex_byte(dev->address);
+        print_str("\r\n");
+        break;
+    }
+}
+
+/* ================================================================
  *  §7  PUBLIC API
  * ================================================================ */
 
@@ -1361,6 +2508,13 @@ void usb_full_init(void) {
     g_n_xhci2   = 0;
     g_n_usb_dev = 0;
     g_n_usb_msc = 0;
+    g_n_uhci    = 0;
+    g_n_ohci    = 0;
+    g_n_usb_audio = 0;
+    g_n_usb_cdc   = 0;
+    g_n_usb_printer = 0;
+    g_n_usb_video   = 0;
+    g_n_usb_bt      = 0;
 
     /* Scan PCI for USB controllers */
     for (int bus = 0; bus < 8; bus++) {
@@ -1371,20 +2525,40 @@ void usb_full_init(void) {
             u8 cls  = (u8)(cr>>24), sub = (u8)(cr>>16), pif = (u8)(cr>>8);
             if (cls != 0x0C || sub != 0x03) continue;
 
-            if (pif == 0x20) {
+            if (pif == 0x00) {
+                print_str("[PCI] UHCI found\r\n");
+                uhci_init_one((u8)bus, (u8)slot, 0);
+            } else if (pif == 0x10) {
+                print_str("[PCI] OHCI found\r\n");
+                ohci_init_one((u8)bus, (u8)slot, 0);
+            } else if (pif == 0x20) {
                 print_str("[PCI] EHCI found\r\n");
                 ehci_init_one((u8)bus, (u8)slot, 0);
             } else if (pif == 0x30) {
                 print_str("[PCI] XHCI found\r\n");
                 x2_init_one((u8)bus, (u8)slot, 0);
             }
-            /* UHCI/OHCI: rely on BIOS PS/2 emulation (ps2.c) */
         }
     }
 
     /* Scan EHCI ports */
-    for (int i = 0; i < g_n_ehci; i++)
-        if (g_ehci[i].active) ehci_scan_ports(&g_ehci[i]);
+    for (int i = 0; i < g_n_ehci; i++) {
+        if (!g_ehci[i].active) continue;
+        Ehci *e = &g_ehci[i];
+        for (int p = 0; p < e->n_ports; p++) {
+            volatile u32 *portsc = (volatile u32*)(e->op + EHCI_PORTSC(p));
+            if (!(*portsc & EHCI_PORT_CCS)) continue;
+            *portsc |= EHCI_PORT_PP;
+            ehci_delay(20000);
+            int speed = ehci_port_reset(e, p);
+            if (speed < 0) continue;
+            int pre = g_n_usb_dev;
+            usb_enumerate_device(0, e->index, (u8)speed);
+            if (g_n_usb_dev > pre)
+                usb_probe_all_classes(&g_usb_dev[g_n_usb_dev-1], g_n_usb_dev-1);
+            *portsc |= (EHCI_PORT_CSC | EHCI_PORT_PEDC);
+        }
+    }
 }
 
 void usb_full_poll(void) {
