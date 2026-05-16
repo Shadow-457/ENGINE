@@ -284,53 +284,16 @@ typedef unsigned long long jmp_buf[8];
  * setjmp(env) — save CPU state into env.
  * Returns 0 when called directly.
  * Returns the nonzero val passed to longjmp() when jumped back to.
+ * Implemented in libc.c.
  */
-static inline int setjmp(jmp_buf env) {
-    int r;
-    __asm__ volatile(
-        "mov  %%rbx,    (%1)\n\t"
-        "mov  %%rbp,   8(%1)\n\t"
-        "mov  %%r12,  16(%1)\n\t"
-        "mov  %%r13,  24(%1)\n\t"
-        "mov  %%r14,  32(%1)\n\t"
-        "mov  %%r15,  40(%1)\n\t"
-        "lea  8(%%rsp), %%rax\n\t"   /* rsp at call site (before ret addr) */
-        "mov  %%rax,  48(%1)\n\t"
-        "mov  (%%rsp), %%rax\n\t"    /* return address = rip at call site  */
-        "mov  %%rax,  56(%1)\n\t"
-        "xor  %0, %0\n\t"            /* return 0 */
-        : "=r"(r)
-        : "r"(env)
-        : "rax", "memory"
-    );
-    return r;
-}
+int  setjmp(jmp_buf env);
 
 /*
  * longjmp(env, val) — restore CPU state from env and jump back.
  * val is returned by the corresponding setjmp(); val=0 becomes 1.
- * Does not return.
+ * Does not return. Implemented in libc.c.
  */
-static inline void longjmp(jmp_buf env, int val) __attribute__((noreturn));
-static inline void longjmp(jmp_buf env, int val) {
-    if (val == 0) val = 1;
-    __asm__ volatile(
-        "mov    (%0), %%rbx\n\t"
-        "mov   8(%0), %%rbp\n\t"
-        "mov  16(%0), %%r12\n\t"
-        "mov  24(%0), %%r13\n\t"
-        "mov  32(%0), %%r14\n\t"
-        "mov  40(%0), %%r15\n\t"
-        "mov  48(%0), %%rsp\n\t"
-        "mov  56(%0), %%rax\n\t"   /* saved rip (return address) */
-        "mov  %1,     %%edi\n\t"   /* val → first return register */
-        "jmp  *%%rax\n\t"
-        :
-        : "r"(env), "r"(val)
-        : /* everything is clobbered — doesn't matter, noreturn */
-    );
-    __builtin_unreachable();
-}
+void longjmp(jmp_buf env, int val) __attribute__((noreturn));
 
 /* ── Phase 1: Input & Controls ───────────────────────────────── */
 
@@ -537,7 +500,4 @@ struct lconv {
 char        *setlocale(int category, const char *locale);
 struct lconv *localeconv(void);
 
-/* setjmp/longjmp for JamVM */
-typedef struct { unsigned long regs[8]; } jmp_buf[1];
-int  setjmp(jmp_buf env);
-void longjmp(jmp_buf env, int val);
+/* setjmp/longjmp — defined above (line ~281), used by JamVM */

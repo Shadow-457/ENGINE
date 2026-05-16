@@ -1,5 +1,6 @@
 #include "../include/kernel.h"
 #include "../include/font8x8.h"
+#include "../include/senc.h"
 
 #define SCR_W        (fb_get_width())
 #define SCR_H        (fb_get_height())
@@ -751,11 +752,28 @@ static void fill_gradient_h(int x,int y,int w,int h,u32 ca,u32 cb){fb_fill_gradi
 static void fill_gradient_v(int x,int y,int w,int h,u32 ca,u32 cb){fb_fill_gradient_v(x,y,w,h,ca,cb);}
 static void draw_shadow_rect(int x,int y,int w,int h){fb_draw_shadow(x,y,w,h);}
 
-static void draw_char(int x,int y,char c,u32 fg,int tbg,u32 bg){
-    if((unsigned char)c<0x20||(unsigned char)c>0x7e)c='?';
-    int idx=(unsigned char)c-0x20;
+/* ---------------------------------------------------------------
+ *  SENC-aware character renderer
+ *  draw_cp()        — render one codepoint at (x,y)
+ *  draw_char()      — legacy wrapper, existing callsites unchanged
+ *  text_w()         — string width in pixels, SENC-aware
+ *  draw_text_clip() — SENC-aware clipped string renderer
+ * --------------------------------------------------------------- */
+static void draw_cp(int x,int y,senc_cp cp,u32 fg,int tbg,u32 bg){
+    const u8 *glyph;
+    static const u8 blank[8]={0,0,0,0,0,0,0,0};
+    /* Redirect ASCII letters and digits to their native SENC codepoints */
+    cp=senc_alpha(cp);
+    if(cp>=0x20&&cp<=0x7E){
+        glyph=font8x8_data[cp-0x20];
+    }else if(cp>=(senc_cp)SENC_CUSTOM_BASE&&
+             cp<(senc_cp)(SENC_CUSTOM_BASE+(unsigned int)SENC_FONT_COUNT)){
+        glyph=senc_font_data[cp-SENC_CUSTOM_BASE];
+    }else{
+        glyph=blank;
+    }
     for(int row=0;row<8;row++){
-        u8 bits=font8x8_data[idx][row];
+        u8 bits=glyph[row];
         for(int col=0;col<8;col++){
             int on=(bits>>(7-col))&1;
             for(int sy=0;sy<GLYPH_SCALE;sy++)for(int sx=0;sx<GLYPH_SCALE;sx++){
@@ -765,9 +783,21 @@ static void draw_char(int x,int y,char c,u32 fg,int tbg,u32 bg){
         }
     }
 }
-static int text_w(const char*s){int n=0;while(s[n])n++;return n*GLYPH_W;}
+static void draw_char(int x,int y,char c,u32 fg,int tbg,u32 bg){
+    draw_cp(x,y,(senc_cp)(unsigned char)c,fg,tbg,bg);
+}
+static int text_w(const char*s){
+    int n=0; senc_cp cp; const senc_u8*p=(const senc_u8*)s;
+    while((p=senc_next(p,&cp)))n++;
+    return n*GLYPH_W;
+}
 static void draw_text_clip(int x,int y,const char*s,u32 fg,int tbg,u32 bg,int max_x){
-    while(*s){if(max_x>0&&x+GLYPH_W>max_x)break;if(x>=0&&x<SCR_W)draw_char(x,y,*s,fg,tbg,bg);x+=GLYPH_W;s++;}
+    senc_cp cp; const senc_u8*p=(const senc_u8*)s;
+    while((p=senc_next(p,&cp))){
+        if(max_x>0&&x+GLYPH_W>max_x)break;
+        if(x>=0&&x<SCR_W)draw_cp(x,y,cp,fg,tbg,bg);
+        x+=GLYPH_W;
+    }
 }
 static void draw_text(int x,int y,const char*s,u32 fg,int tbg,u32 bg){draw_text_clip(x,y,s,fg,tbg,bg,SCR_W);}
 static void draw_text_c(int x,int y,int w,const char*s,u32 fg,int tbg,u32 bg){int ox=(w-text_w(s))/2;if(ox<0)ox=0;draw_text_clip(x+ox,y,s,fg,tbg,bg,x+w);}

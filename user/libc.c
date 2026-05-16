@@ -1172,4 +1172,5 @@ void longjmp(jmp_buf env, int val) {
         "ret\n"
         : : "r"(env), "r"(val != 0 ? val : 1)
     );
+    __builtin_unreachable();
 }

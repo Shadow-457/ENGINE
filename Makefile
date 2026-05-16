@@ -332,13 +332,26 @@ POSIX_TEST: user/crt0.o user/libc.o user/posix_test.o
 posix_test: POSIX_TEST
 	@echo "Built POSIX_TEST -- add to disk with: make addprog PROG=POSIX_TEST"
 
-programs: systrix.img HELLO_C MYPROGRAM POSIX_TEST
-	MTOOLS_SKIP_CHECK=1 mcopy -i fat32.img HELLO_C   ::/HELLO_C
-	MTOOLS_SKIP_CHECK=1 mcopy -i fat32.img MYPROGRAM ::/MYPROGRAM
+# -- SENC test suite -----------------------------------------------
+user/senc_test.o: user/senc_test.c include/senc.h
+	$(CC) $(UCFLAGS) -I. -c -o $@ $<
+
+SENC_TEST: user/crt0.o user/libc.o user/senc_test.o
+	$(LD) -m elf_x86_64 -static -nostdlib \
+	      -Ttext=0x400000 -o $@ $^
+
+senc_test: SENC_TEST
+	@echo "Built SENC_TEST -- add to disk with: make addprog PROG=SENC_TEST"
+	@echo "  Boot QEMU then run:  elf SENC_TEST"
+
+programs: systrix.img HELLO_C MYPROGRAM POSIX_TEST SENC_TEST
+	MTOOLS_SKIP_CHECK=1 mcopy -i fat32.img HELLO_C    ::/HELLO_C
+	MTOOLS_SKIP_CHECK=1 mcopy -i fat32.img MYPROGRAM  ::/MYPROGRAM
 	MTOOLS_SKIP_CHECK=1 mcopy -i fat32.img POSIX_TEST ::/POSIX_TEST
+	MTOOLS_SKIP_CHECK=1 mcopy -i fat32.img SENC_TEST  ::/SENC_TEST
 	dd if=fat32.img of=systrix.img bs=512 seek=512 conv=notrunc status=none
-	@echo "Added HELLO_C, MYPROGRAM and POSIX_TEST to systrix.img"
-	@echo "  Boot QEMU then run:  elf POSIX_TEST"
+	@echo "Added HELLO_C, MYPROGRAM, POSIX_TEST and SENC_TEST to systrix.img"
+	@echo "  Boot QEMU then run:  elf SENC_TEST"
 
 # -- Add a program to the FAT32 partition --------------------------
 # Usage: make addprog PROG=./myapp

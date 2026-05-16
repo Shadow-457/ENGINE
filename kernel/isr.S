@@ -332,9 +332,18 @@ timer_isr:
 # ================================================================
 #  scheduler_exit — mark RUNNING process DEAD, free resources.
 #  Caller must already have interrupts disabled.
+#
+#  IMPORTANT: save return address into r15 BEFORE freeing PCB_KBASE.
+#  After heap_free the kernel stack memory is gone — a plain `ret`
+#  would pop a garbage address.  `jmp r15` returns without touching
+#  the freed stack.
 # ================================================================
 scheduler_exit:
     cli
+    # Pop return address into r15 so we can jump back after the
+    # kstack is freed (can't use `ret` after heap_free(kbase)).
+    pop  r15
+
     mov  rbx, PROC_TABLE
     mov  rcx, PROC_MAX
 .se_find:
@@ -343,8 +352,7 @@ scheduler_exit:
     add  rbx, PROC_PCB_SZ
     dec  rcx
     jnz  .se_find
-    sti
-    ret
+    jmp  r15
 
 .se_found:
     mov  qword ptr [rbx + PCB_STATE], PSTATE_DEAD
@@ -358,9 +366,11 @@ scheduler_exit:
     pop  rbx
 .se_no_vmm:
 
+    # Free the kstack. After this call the stack memory is gone —
+    # use jmp r15 (saved retaddr) instead of ret.
     mov  rdi, qword ptr [rbx + PCB_KBASE]
     call heap_free
-    ret
+    jmp  r15
 
 # ================================================================
 #  syscall_entry — BUG 3 FIX + RSP-scan fix
